@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  test:
+    # 项目面向 Windows（mpv 命名管道 IPC、托盘、.bat 启动脚本）
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 语法检查所有 JS
+        shell: pwsh
+        run: |
+          $failed = @()
+          foreach ($f in Get-ChildItem -Path . -Recurse -Filter *.js -File) {
+            node --check $f.FullName
+            if ($LASTEXITCODE -ne 0) { $failed += $f.FullName }
+          }
+          if ($failed.Count) { Write-Error ("语法错误: " + ($failed -join ', ')); exit 1 }
+          Write-Host "全部 JS 语法检查通过"
+
+      - name: 检查 .bat / .cmd 必须是 CRLF 换行
+        shell: pwsh
+        run: |
+          $bad = @()
+          foreach ($f in Get-ChildItem -Path . -Recurse -Include *.bat,*.cmd -File) {
+            $bytes = [System.IO.File]::ReadAllBytes($f.FullName)
+            $lf = ($bytes | Where-Object { $_ -eq 10 }).Count
+            $cr = ($bytes | Where-Object { $_ -eq 13 }).Count
+            if ($lf -gt 0 -and $cr -eq 0) { $bad += $f.FullName }
+          }
+          if ($bad.Count) {
+            Write-Error ("这些批处理是 LF 换行，cmd.exe 会报错，请改成 CRLF: " + ($bad -join ', '))
+            exit 1
+          }
+          Write-Host "所有 .bat/.cmd 都是 CRLF"
+
+      - name: 单元测试（不需要 mpv 与浏览器）
+        run: |
+          node tools/encoding-test.js
+          node tools/store-test.js
+
+      # 完整端到端（tools/e2e-test.js）需要真实 mpv.exe，
+      # UI 测试（tools/ui-test.js）需要 Chromium，两者默认不在 CI 里跑：
+      # 本地执行 `npm test` / `npm run test:ui` 即可。

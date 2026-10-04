@@ -1,0 +1,317 @@
+# mpv-webdav
+
+一个跑在自己电脑上的小网页，像 PotPlayer 的「专辑」那样管理 **WebDAV** 上的影视库：
+浏览目录 → 点一下视频 → **本机 mpv 直接播放**，**同目录 / 字幕子目录里的外挂字幕自动挂上**。
+
+> **它是什么、不是什么**
+>
+> - 它**不是** Jellyfin / Emby / Plex 那类媒体服务器：不刮削、不转码、不建索引、不占服务器资源。
+> - 它**不是**网页播放器：真正的播放器是**你本机的 mpv**，画质、硬解、字幕渲染、快捷键全部由 mpv 决定。
+> - 它解决的是：WebDAV 上的片，怎么用**本机 mpv** 舒服地看——包括"选了哪条流""字幕编码乱码""外挂字幕挂不上"这些坑。
+> - 与 mpv 官方、各网盘厂商均**无关联**，仅调用本机已安装的 mpv。
+>
+> 播放必须发生在**有桌面的本机**（mpv 要在交互式用户会话里运行），所以它天然是一个"本地小工具"，不是远程服务。
+
+- 无需把文件下载到本地，也不需要把 WebDAV 挂载成磁盘
+- 服务只监听 `127.0.0.1`，纯本地使用
+- 零依赖：只用 Node.js 内置模块 + 原生前端，不用 `npm install`，不用打包
+- 需要你自备 **Node.js 18+** 与 **mpv**（仓库不附带 mpv 二进制，放到 `mpv\mpv.exe` 或自己在设置里指定路径）
+
+![播放界面](docs/screenshot-playing.png)
+
+（上图为无头浏览器实测截图，用的是仓库里自动生成的测试样片：左侧专辑与播放列表、中间目录列表、底部播放条与 `字幕 3` 指示。）
+
+---
+
+## 1. 快速开始
+
+需要 **Node.js 18+**（本机已是 v24）。
+
+```bat
+:: 方式一：双击 start.bat（自动打开浏览器）
+start.bat
+
+:: 不自动开浏览器 / 换端口
+start.bat --no-browser
+start.bat 9000
+set MPV_WEBDAV_NO_BROWSER=1
+start.bat
+
+:: 方式二：命令行直接跑（不自动开浏览器）
+node server\index.js            :: 默认 http://127.0.0.1:8787/
+node server\index.js 9000       :: 指定端口
+node server\index.js --open     :: 顺便打开浏览器
+
+:: 方式三：npm
+npm start
+```
+
+也可以 `pwsh -NoProfile -File .\start.ps1 -Port 8787`（`-NoBrowser` 同理）。
+
+### 常驻托盘 + 开机自启（推荐日常使用）
+
+```bat
+:: 双击 start-tray.vbs —— 无黑窗，右下角出现托盘图标，服务在后台常驻
+start-tray.vbs
+```
+
+托盘菜单：
+
+| 菜单项 | 作用 |
+| --- | --- |
+| 打开控制台（双击图标同效） | 打开 <http://127.0.0.1:8787/> |
+| 重启服务 | 优雅关闭再启动（数据不会丢） |
+| 打开数据目录 / 查看日志 | 直接打开 `data\`、`logs\server.log` |
+| **开机自启** | 勾选后登录即自动常驻 |
+| 退出 | 优雅关闭服务（连同 mpv 一起收掉） |
+
+开机自启也可以命令行设置：
+
+```powershell
+pwsh -NoProfile -File .\tools\autostart.ps1 -Status      # 看当前状态
+pwsh -NoProfile -File .\tools\autostart.ps1 -Install     # 设置（在「启动」文件夹放一个快捷方式）
+pwsh -NoProfile -File .\tools\autostart.ps1 -Uninstall   # 取消
+```
+
+说明：
+
+- 托盘只是个「看门人」，服务本身还是同一个 `server\index.js`，日志写到 `logs\server.log`；
+- 如果检测到 8787 上已经有服务在跑，托盘会**复用**它而不是再起一个；退出时也不会去关别人的实例；
+- **不要**把它做成 Windows 服务：服务跑在 session 0，mpv 的窗口不会出现在你的桌面上，托盘图标也看不到；
+- 托盘进程是单实例的，重复双击 `start-tray.vbs` 只会打开控制台，不会起第二份。
+
+> 启动逻辑都在 Node 里（`server/index.js` 解析 `--open` / `--no-browser` / 端口），`start.bat` 只有 4 行，因此不会再受批处理换行符影响。
+
+启动后浏览器会自动打开 <http://127.0.0.1:8787/>（`start.bat` 会；直接 `node` 运行时手动打开即可）。
+
+## 2. 建一个 WebDAV 专辑
+
+1. 左侧「专辑」→ **+ 新建专辑**
+2. 填参数：
+
+| 字段 | 说明 | 例子 |
+| --- | --- | --- |
+| 名称 | 随便起，只影响显示 | `家庭 NAS` |
+| 类型 | 目前只支持 **WebDAV** | `WebDAV` |
+| 服务器地址 | WebDAV 服务根地址，**必须以 `http://` 或 `https://` 开头** | 群晖 `http://192.168.1.10:5005/dav`<br>威联通 `https://nas:8081/dav`<br>Alist `http://192.168.1.10:5244/dav` |
+| 根目录 | 从这个子路径开始浏览（默认 `/`） | `/影视/电影` |
+| 用户名 / 密码 | WebDAV 账号；密码只存在本机 `data\albums.json` | |
+| 认证方式 | `基本认证 basic`（默认）/ `摘要认证 digest` / `无认证 none` | 群晖常用 basic；部分老 NAS 用 digest |
+| 忽略证书校验 | 自签名 HTTPS 证书时勾上 | |
+| 高级 → 自定义请求头 | 每行一个 `Name: Value`，例如需要固定 `User-Agent` 时 | |
+
+3. 点 **测试连接**，看到「连接成功：N 个文件夹 / M 个文件」即可 **保存**。
+4. 点左侧专辑 → 中间出现目录 → 双击文件夹进入，双击视频播放。
+
+> 常见 WebDAV 地址后缀：群晖 `/dav`、威联通 `/dav`、Alist `/dav`、Nextcloud `/remote.php/dav/files/<用户名>/`。
+
+## 3. 播放与字幕
+
+点视频行上的 **播放**（或双击整行）= 立刻播放；行尾 **⋯ → 追加到播放列表** = 排到队尾；
+工具栏 **▶ 播放全部** = 按当前排序把本目录所有视频/音频依次加入播放列表。
+
+目录操作：**双击文件夹进入**（也可以点行内 **进入** 按钮，或选中后按回车），单击只做选中；
+工具栏 **↑ 上级** 或点面包屑返回。
+
+字幕规则（在「设置」里可改）：
+
+- 扫描**视频所在目录**里所有字幕扩展名文件（`srt/ass/ssa/sub/idx/sup/vtt/smi/mks/pgs...`），按文件名匹配：
+  - `影片.srt`（完全同名）优先
+  - `影片.chs.srt`、`影片.zh-CN.ass`、`影片.eng.srt`（同名 + 语言后缀）
+  - 其次是宽松前缀匹配
+- 若同目录没有，再去 **字幕子目录**（默认 `subs`、`sub`、`subtitle`、`subtitles`、`字幕`）里找
+- **目录级兜底**（默认开启）：上面都匹配不到时，如果该目录里**只有一个视频**，就把这个目录（含字幕子目录）里的全部字幕都挂给它。
+  这条专治真实影视库里常见的情况：视频是发布组英文名（`Some.Movie.2012.1080p.BluRay.x264.mkv`），字幕却是中文片名（`某部电影 2012.Chs.ass`），文件名毫无共同前缀。
+  可在「设置」里关闭。
+- 排序参考 `slang`（默认 `zh,chi,zho,eng`），所以中文字幕会排在前面、默认选中
+- **编码自动转 UTF-8**：中文影视库里的 `.srt/.ass` 很多是 GBK/GB18030（也有 BIG5/UTF-16），
+  mpv 按 UTF-8 解出来就是 `ÎÒh»á¹yz` 这种乱码。服务端会先探测字幕编码、转成 UTF-8 再交给 mpv，
+  所以你不需要手动配 `--sub-codepage`。可在设置里改成「不转换」或强制某个编码。
+- 所有找的字幕都通过 `--sub-files-append` 交给 mpv，mpv 里按 `j`/轨道菜单可随时切换；mkv 内封字幕由 mpv 自行处理
+
+播放由 mpv 完成，画质/硬解等参数在 **设置 → 附加 mpv 参数** 里写（每行一个），例如：
+
+```
+--hwdec=auto
+--cache=yes
+--profile=gpu-hq
+```
+
+`alang` / `slang` 默认 `zh,chi,zho,eng`，用于自动选择音轨和字幕。
+
+## 4. 工作原理
+
+```
+浏览器 (http://127.0.0.1:8787)      Node 服务 (server/)                 mpv.exe
+  │  专辑 / 浏览 / 播放控制            │                                    │
+  ├─ /api/albums ───────────────────► data/albums.json                    │
+  ├─ /api/browse ───────────────────► PROPFIND → WebDAV 服务器            │
+  │                                    │  (basic/digest 认证, TLS 选项)     │
+  ├─ /api/play ─────────────────────► 扫描同目录字幕                       │
+  │                                    ├─ loadfile / 启动 mpv ────────────►│
+  │                                    │   url = /stream/<token>/<album>/… │
+  │                                    │        │                         │
+  │                                    │        └─► 本地流代理 GET+Range ──┼─► WebDAV
+  │◄─ /api/events (SSE 播放状态) ──────┤   命名管道 IPC 回传进度/控制 ◄─────┤
+```
+
+- **为什么要本地流代理**：mpv 直接播 WebDAV URL 会遇到「认证方式不统一、中文路径编码、需要自定义请求头」等问题。
+  服务端统一处理认证并把字节流转给 mpv，mpv 只看见 `http://127.0.0.1:8787/stream/<一次性token>/...`，
+  并且完整支持 HTTP `Range`（拖动进度条不会重新下载）。
+- **两种播放通道**（自动选择，日志里会说明）：
+  1. **IPC 模式（默认）**：常驻一个 mpv，用命名管道传 JSON 命令 → 支持播放列表、暂停/继续、拖动进度、音量、上一首/下一首，进度实时回显到网页。
+  2. **回退模式**：命名管道不可用时（例如某些受限沙箱），改为每次点播启动一个 mpv 进程。
+     播放和字幕完全一样，但拖动进度、暂停等远程控制不可用，「下一首」由服务端重启进程实现。
+
+## 5. 目录结构
+
+```
+mpv-webdav/
+├─ server/
+│  ├─ index.js      HTTP 服务、API 路由、SSE、流代理
+│  ├─ webdav.js     WebDAV 客户端：PROPFIND、basic/digest 认证、TLS、重定向、Range
+│  ├─ xml.js        极简 XML 解析（解析 multistatus）
+│  ├─ media.js      扩展名分类、字幕匹配与语言优先级
+│  ├─ mpv.js        mpv 控制器（IPC + 回退双通道）
+│  └─ store.js      专辑与设置持久化（data/*.json）
+├─ public/          前端（原生 HTML/CSS/JS，无构建）
+├─ data/            运行后生成：albums.json、settings.json
+├─ mpv/             随工作区提供的 mpv
+├─ tools/           测试与调试工具（见下）
+├─ start.bat / start.ps1 / package.json
+```
+
+## 6. 设置项
+
+| 设置 | 默认 | 说明 |
+| --- | --- | --- |
+| mpv.exe 路径 | `<项目>\mpv\mpv.exe` | 换成别的 mpv 也可以 |
+| 视频 / 音频 / 字幕扩展名 | 常见集合 | 决定什么文件能被识别、播放 |
+| 字幕搜索子目录 | `subs,sub,subtitle,subtitles,字幕` | 同目录找不到时再去这里找 |
+| 单视频目录字幕兜底 | 开 | 目录里只有一个视频时，挂载该目录内全部字幕（中英文片名不一致时很有用） |
+| 外挂字幕编码 | 自动检测并转 UTF-8 | 也可「不转换」（自己加 `--sub-codepage`）或强制 GB18030 / BIG5 / Shift_JIS |
+| alang / slang | `zh,chi,zho,eng` | 音轨 / 字幕语言优先级 |
+| 附加 mpv 参数 | 空 | 每行一个 |
+| 默认音量 | 100 | 新开的 mpv 使用该音量 |
+
+## 7. 测试与自检
+
+```bat
+:: 端到端测试：mock WebDAV + 真实 mpv，验证浏览/认证/Range/播放/字幕
+node tools\e2e-test.js
+
+:: 要求必须走命名管道 IPC（普通桌面环境下跑）
+node tools\e2e-test.js --require-ipc
+
+:: 无头浏览器 UI 测试（需要 Chrome 或 Edge），并输出截图到 tools\.ui\
+node tools\ui-test.js
+
+:: 用 data\ 里已保存的专辑跑一遍真实界面点击（复制一份数据，不动原文件），截图到 tools\.uilive\
+node tools\ui-live.js
+
+:: 鼠标命中诊断：打印「点这个坐标会命中哪个元素」，用来排查"点了没反应/点错按钮"
+node tools\probe-input.js --with-app --with-mock
+
+:: 只想在本地试玩：起一个 mock WebDAV（密码 tester/secret）
+node tools\mock-webdav.js --root tools\testdata --port 8899 --base /dav --auth basic --user tester --pass secret
+:: 然后在网页里新建专辑：http://127.0.0.1:8899/dav
+
+:: 生成测试样片（需要 ffmpeg 在 PATH，或传 -Ffmpeg <路径>）
+powershell -NoProfile -File tools\make-testdata.ps1
+
+:: 探测这台机器上 mpv 的 IPC 是否可用
+node tools\probe-ipc.js
+
+:: 验证专辑配置的自动备份 / 误删恢复（只操作 tools\.storetest）
+node tools\store-test.js
+
+:: 字幕编码：单元测试 + 对着真实服务器查某个字幕文件的编码
+node tools\encoding-test.js
+node tools\check-encoding.js --url https://nas.example.com:5006/dav --user <用户名> --pass <密码> --path "/影视/电影/xxx.ass"
+
+:: 字幕渲染体检：同一帧渲染两次（原始 GBK vs 代理转 UTF-8），输出到 docs\
+node tools\subtitle-render-check.js
+
+:: 对着真实 WebDAV 服务跑一遍（建专辑→浏览→真播→检查 mpv 实际轨道/字幕）
+node tools\live-check.js --url https://nas.example.com:5006/dav --user <用户名> --pass <密码> ^
+     --path "/影视/电影/示例影片.2022/01.mp4" --seconds 8
+::   --scan --depth 3              在这棵树里找「视频+外挂字幕」的目录并验证挂载
+::   --headless 默认开：mpv 用 --vo=null --ao=null，不弹窗不出声；加 --no-headless 可看真实播放
+```
+
+`tools/testdata` 里是自动生成的 3 段小视频和 3 个外挂字幕（含中文名与 `subs/` 子目录场景）。
+
+> 所有测试脚本都会**动态分配端口**，并在启动后断言"连到的是本次测试自己的实例"（端口一致、专辑列表符合预期），
+> 否则立即中止、不做任何修改——因此不会占用你正在使用的 `8787`，也不会写你的 `data/`（`ui-live` 只读取 `data/` 的副本）。
+
+## 8. 常见问题
+
+**Q：点播放没反应 / 提示找不到 mpv.exe**
+在「设置」里把 mpv.exe 路径填对（默认是项目目录下的 `mpv\mpv.exe`，也可以指向你自己装的 mpv）。顶栏的 mpv 状态药丸会显示是否检测到。
+
+**Q：测试连接报 401**
+账号密码或认证方式不对。先试 `basic`，不行再试 `digest`，或确认该 WebDAV 路径是否需要开「允许 HTTP 访问」。
+
+**Q：报 TLS 证书错误**
+自签名证书时勾选「忽略证书校验」。
+
+**Q：服务能浏览但播放失败**
+1. 看服务端控制台的错误输出；
+2. 有些 WebDAV 服务不支持 `Range` 或对大文件有限制，可在专辑高级里加请求头；
+3. 确认 mpv 能在命令行播放该流：脚本会在 `tools\.e2e\mpv.log` 留下 mpv 自己的日志。
+
+**Q：网页显示了「已切换轮询模式」**
+SSE 被浏览器/代理打断，已自动降级为每 2 秒轮询，功能不受影响。
+
+**Q：进度条拖不动、没有「下一首」效果**
+说明当前是**回退模式**（命名管道 IPC 不可用）。普通 Windows 桌面上应该是 IPC 模式；可用 `node tools\probe-ipc.js` 确认。
+
+**Q：点文件夹进不去 / 点了没反应**
+单击文件夹只会选中（高亮），**双击**才进入；也可以点行内 **进入** 按钮，或选中后按回车。
+若双击仍无反应，看底部状态栏的错误信息（多为路径权限或服务器返回错误），可用 `node tools\live-check.js …` 直接对服务器验证。
+
+**Q：点专辑名却弹出了「编辑专辑」**
+已修复：悬停时出现的操作按钮（编辑/测试连接/删除）现在只覆盖专辑条目第二行的地址区，不会再压住专辑名。
+
+**Q：新建专辑填到一半，点到弹窗外就没了**
+已修复：点遮罩不再关闭对话框；只有显式点「取消 / ✕」或用 Esc（且表单有改动时会先弹确认）才会关闭。
+
+**Q：外挂字幕显示成 `ÎÒh»á¹yz` 这类乱码**
+字幕文件的编码不是 UTF-8（多为 GBK/GB18030，也有 BIG5），mpv 按 UTF-8 解就是乱码。
+本应用**默认会自动探测并转成 UTF-8 再交给 mpv**，所以先确认你重启过服务（后端改动需要重启，改动前的老进程没有这个能力）；
+如果某些文件仍然乱码，可在「设置 → 外挂字幕编码」里强制指定（如 GB18030 或 BIG5）。
+也可以先用 `node tools\check-encoding.js --url <WebDAV> --user <用户> --pass <密码> --path <字幕路径>` 看它到底是什么编码。
+
+想自己拿 mpv 直接播（不走本应用）时，加参数 `--sub-codepage=gb18030` 即可。
+
+**Q：端口被占用**
+`node server\index.js 9000` 或 `start.bat 9000` 换端口。
+
+**Q：运行 `start.bat` 报 `'""' 不是内部或外部命令` / `'8787"' 不是内部或外部命令`**
+批处理文件被存成了 **LF 换行**（很多编辑器/工具默认如此），而 cmd.exe 解析 `if ... set` 需要 **CRLF**。仓库里的版本是 CRLF；如果被改坏，用记事本另存为 CRLF，或执行一次：
+
+```powershell
+$p='start.bat'; [IO.File]::WriteAllText($p, ([IO.File]::ReadAllText($p) -replace "`r`n","`n" -replace "`n","`r`n"))
+```
+
+## 9. 数据文件与备份
+
+**`data/` 是你的数据目录，不要删。**
+
+| 文件 | 内容 |
+| --- | --- |
+| `data/albums.json` | 你建的所有专辑（**密码是明文**，因为服务要用它登录 WebDAV） |
+| `data/albums.json.bak` | 上一次保存前的自动备份 |
+| `data/settings.json`（+`.bak`） | 设置项 |
+
+- 每次保存前，程序会先把现有文件另存为 `.bak`；
+- 启动时如果 `albums.json` **被删掉或写坏了**，会自动从 `.bak` 恢复并在控制台提示，恢复后重建主文件；
+- 所以最坏情况下你只会丢掉"最后一次修改"，不会丢掉整个专辑列表；
+- 想手动兜底的话，直接复制一份 `data\albums.json` 到别处即可（`node tools\store-test.js` 可以验证上面这些行为）。
+
+## 10. 安全与隐私
+
+- 服务**只监听 `127.0.0.1`**，局域网内其它机器访问不到。
+- 流代理地址带一次性随机 token（进程重启即失效），防止本机其它页面顺手读取你的 NAS 内容。
+- 专辑密码以**明文**保存在 `data\albums.json`（仅本机），因为服务需要用它去登录 WebDAV；接口不会把密码回传给前端。若要更保险，请给 `data` 目录设置好本机访问权限，或使用 WebDAV 的只读专用账号。
+- 建议使用 HTTPS 的 WebDAV 地址，避免密码明文过网。

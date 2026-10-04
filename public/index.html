@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mpv WebDAV 专辑</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23161b22'/%3E%3Cpath d='M12 9l12 7-12 7z' fill='%233ea6ff'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ============ 应用外壳 ============ -->
+<div class="app" id="app">
+
+  <!-- 顶部标题栏 -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">▶</span>
+      <span class="brand-name">mpv WebDAV 专辑</span>
+    </div>
+    <div class="topbar-right">
+      <span class="pill" id="mpv-pill" title="mpv 可执行文件状态">
+        <span class="pill-dot" id="mpv-pill-dot"></span>
+        <span id="mpv-pill-text">检测中…</span>
+      </span>
+      <button class="btn" id="btn-settings" type="button">⚙ 设置</button>
+    </div>
+  </header>
+
+  <!-- 主体：侧边栏 + 内容区 -->
+  <div class="body">
+
+    <!-- 左侧边栏 -->
+    <aside class="sidebar" id="sidebar">
+
+      <!-- 专辑 -->
+      <section class="pane pane-albums">
+        <div class="pane-head">
+          <h2 class="pane-title">专辑</h2>
+          <button class="btn btn-sm btn-accent" id="btn-new-album" type="button">+ 新建专辑</button>
+        </div>
+        <div class="pane-body" id="album-list">
+          <div class="pane-hint">加载中…</div>
+        </div>
+      </section>
+
+      <!-- 播放列表 -->
+      <section class="pane pane-queue">
+        <div class="pane-head">
+          <h2 class="pane-title">播放列表 <span class="count" id="queue-count">0</span></h2>
+        </div>
+        <div class="pane-body" id="queue-list">
+          <div class="pane-hint">暂无播放列表</div>
+        </div>
+        <div class="queue-actions">
+          <button class="btn btn-sm" id="queue-prev" type="button" title="上一首">⏮ 上一首</button>
+          <button class="btn btn-sm" id="queue-toggle" type="button" title="播放 / 暂停">▶ 播放</button>
+          <button class="btn btn-sm" id="queue-stop" type="button" title="停止">⏹ 停止</button>
+          <button class="btn btn-sm" id="queue-next" type="button" title="下一首">⏭ 下一首</button>
+        </div>
+      </section>
+
+    </aside>
+
+    <!-- 主内容区 -->
+    <main class="main">
+
+      <div class="toolbar">
+        <div class="toolbar-row toolbar-row-top">
+          <nav class="breadcrumb" id="breadcrumb" aria-label="路径导航"></nav>
+        </div>
+        <div class="toolbar-row toolbar-row-bottom">
+          <button class="btn btn-sm" id="btn-up" type="button" title="返回上级目录">↑ 上级</button>
+          <button class="btn btn-sm" id="btn-refresh" type="button" title="刷新当前目录">⟳ 刷新</button>
+          <span class="sep"></span>
+          <input class="input input-search" id="search-input" type="search" placeholder="搜索当前目录（按 / 聚焦）" autocomplete="off" spellcheck="false">
+          <select class="input input-select" id="sort-key" title="排序字段">
+            <option value="name">名称</option>
+            <option value="size">大小</option>
+            <option value="mtime">时间</option>
+          </select>
+          <button class="btn btn-sm" id="sort-dir" type="button" title="切换升序 / 降序">↑ 升序</button>
+          <span class="sep"></span>
+          <div class="seg" role="group" aria-label="视图切换">
+            <button class="seg-btn is-active" id="btn-view-list" type="button" title="列表视图">☰ 列表</button>
+            <button class="seg-btn" id="btn-view-grid" type="button" title="网格视图">▦ 网格</button>
+          </div>
+          <span class="spacer"></span>
+          <button class="btn btn-sm btn-accent" id="btn-play-all" type="button" title="按当前排序播放本目录全部媒体">▶ 播放全部</button>
+        </div>
+      </div>
+
+      <div class="listing" id="listing" tabindex="0" aria-label="目录内容"></div>
+
+    </main>
+  </div>
+
+  <!-- 播放器条 -->
+  <footer class="playerbar" id="playerbar">
+    <div class="np-info">
+      <div class="np-title" id="np-title">未播放</div>
+      <div class="np-path" id="np-path" title=""></div>
+    </div>
+    <div class="np-controls">
+      <button class="btn btn-icon" id="btn-stop" type="button" title="停止" disabled>⏹</button>
+      <button class="btn btn-icon" id="btn-toggle" type="button" title="暂停 / 继续" disabled>▶</button>
+    </div>
+    <div class="np-seek">
+      <input class="range" id="seek" type="range" min="0" max="1000" step="1" value="0" disabled aria-label="播放进度">
+      <span class="time" id="np-pos">00:00</span>
+      <span class="time-sep">/</span>
+      <span class="time" id="np-dur">00:00</span>
+    </div>
+    <div class="np-extra">
+      <span class="subs-ind" id="np-subs" title="已加载字幕数量">字幕 0</span>
+      <button class="btn btn-icon" id="btn-mute" type="button" title="静音切换" disabled>🔊</button>
+      <input class="range range-vol" id="volume" type="range" min="0" max="100" step="1" value="100" disabled aria-label="音量">
+      <span class="time" id="np-vol">100</span>
+    </div>
+  </footer>
+
+  <!-- 底部状态栏 -->
+  <div class="statusbar">
+    <span class="status-left" id="status-left">就绪</span>
+    <span class="status-right" id="status-right"></span>
+  </div>
+
+</div>
+
+<!-- ============ 专辑 新建 / 编辑 对话框 ============ -->
+<div class="modal hidden" id="dlg-album" role="dialog" aria-modal="true" aria-labelledby="dlg-album-title">
+  <div class="modal-mask"></div>
+  <div class="modal-box">
+    <div class="modal-head">
+      <h3 class="modal-title" id="dlg-album-title">新建专辑</h3>
+      <button class="btn btn-icon" type="button" data-close="1" title="关闭">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label class="label" for="al-name">名称 <span class="req">*</span></label>
+        <input class="input" id="al-name" type="text" placeholder="例如：家庭 NAS" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="field">
+        <label class="label" for="al-type">类型</label>
+        <select class="input" id="al-type">
+          <option value="webdav">WebDAV</option>
+          <option value="smb" disabled>SMB（后续支持）</option>
+          <option value="local" disabled>本地目录（后续支持）</option>
+        </select>
+      </div>
+      <div class="field">
+        <label class="label" for="al-url">服务器地址 <span class="req">*</span></label>
+        <input class="input" id="al-url" type="text" placeholder="https://nas.example.com:5006/dav" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="field">
+        <label class="label" for="al-root">根目录</label>
+        <input class="input" id="al-root" type="text" placeholder="/" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="grid-2">
+        <div class="field">
+          <label class="label" for="al-username">用户名</label>
+          <input class="input" id="al-username" type="text" autocomplete="off" spellcheck="false">
+        </div>
+        <div class="field">
+          <label class="label" for="al-password">密码</label>
+          <input class="input" id="al-password" type="password" autocomplete="new-password">
+        </div>
+      </div>
+      <div class="grid-2">
+        <div class="field">
+          <label class="label" for="al-auth">认证方式</label>
+          <select class="input" id="al-auth">
+            <option value="basic">基本认证 basic</option>
+            <option value="digest">摘要认证 digest</option>
+            <option value="none">无认证 none</option>
+          </select>
+        </div>
+        <div class="field field-check">
+          <label class="check">
+            <input type="checkbox" id="al-verify-tls">
+            <span>忽略证书校验</span>
+          </label>
+        </div>
+      </div>
+
+      <details class="adv" id="al-adv">
+        <summary>高级</summary>
+        <div class="field">
+          <label class="label" for="al-headers">自定义请求头</label>
+          <textarea class="input textarea" id="al-headers" rows="4" spellcheck="false"
+            placeholder="每行一个，格式 Name: Value&#10;例如：User-Agent: mpv-webdav"></textarea>
+        </div>
+      </details>
+
+      <div class="test-result hidden" id="al-test-result"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" id="al-btn-test" type="button">测试连接</button>
+      <span class="spacer"></span>
+      <button class="btn" type="button" data-close="1">取消</button>
+      <button class="btn btn-accent" id="al-btn-save" type="button">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 设置 对话框 ============ -->
+<div class="modal hidden" id="dlg-settings" role="dialog" aria-modal="true" aria-labelledby="dlg-settings-title">
+  <div class="modal-mask"></div>
+  <div class="modal-box modal-box-wide">
+    <div class="modal-head">
+      <h3 class="modal-title" id="dlg-settings-title">设置</h3>
+      <button class="btn btn-icon" type="button" data-close="1" title="关闭">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label class="label" for="st-mpv-path">mpv.exe 路径</label>
+        <input class="input" id="st-mpv-path" type="text" spellcheck="false" placeholder="C:\path\to\mpv.exe">
+        <div class="help" id="st-mpv-help"></div>
+      </div>
+      <div class="field">
+        <label class="label" for="st-video-exts">视频扩展名（逗号分隔）</label>
+        <input class="input" id="st-video-exts" type="text" spellcheck="false" placeholder="mkv, mp4, avi, ts, m2ts">
+      </div>
+      <div class="field">
+        <label class="label" for="st-audio-exts">音频扩展名（逗号分隔）</label>
+        <input class="input" id="st-audio-exts" type="text" spellcheck="false" placeholder="flac, mp3, m4a, wav">
+      </div>
+      <div class="field">
+        <label class="label" for="st-sub-exts">字幕扩展名（逗号分隔）</label>
+        <input class="input" id="st-sub-exts" type="text" spellcheck="false" placeholder="ass, srt, ssa, vtt">
+      </div>
+      <div class="field">
+        <label class="label" for="st-sub-dirs">字幕搜索子目录（逗号分隔）</label>
+        <input class="input" id="st-sub-dirs" type="text" spellcheck="false" placeholder="subs, subtitles, 字幕">
+      </div>
+      <div class="field field-check">
+        <label class="check">
+          <input type="checkbox" id="st-sub-fallback">
+          <span>目录里只有一个视频时，自动挂载该目录内全部字幕（应对中英文片名不一致，如 <code>某部电影 2012.Chs.ass</code> 配 <code>Some.Movie.2012.1080p.mkv</code>）</span>
+        </label>
+      </div>
+      <div class="field">
+        <label class="label" for="st-sub-encoding">外挂字幕编码</label>
+        <select class="input" id="st-sub-encoding">
+          <option value="auto">自动检测并转 UTF-8（推荐）</option>
+          <option value="off">不转换（原样交给 mpv，需自行设置 --sub-codepage）</option>
+          <option value="utf-8">强制 UTF-8</option>
+          <option value="gb18030">强制 GB18030 / GBK（大陆简体）</option>
+          <option value="big5">强制 BIG5（港澳台繁体）</option>
+          <option value="shift_jis">强制 Shift_JIS（日文）</option>
+        </select>
+        <div class="help">中文影视库的 .srt/.ass 常是 GBK 编码，mpv 按 UTF-8 解出来就是 <code>ÎÒh»á¹yz</code> 这种乱码。默认自动检测并转成 UTF-8 再交给 mpv。</div>
+      </div>
+      <div class="grid-2">
+        <div class="field">
+          <label class="label" for="st-alang">默认音轨语言 alang</label>
+          <input class="input" id="st-alang" type="text" spellcheck="false" placeholder="jpn,chi,eng">
+        </div>
+        <div class="field">
+          <label class="label" for="st-slang">默认字幕语言 slang</label>
+          <input class="input" id="st-slang" type="text" spellcheck="false" placeholder="chi,zh,eng">
+        </div>
+      </div>
+      <div class="field">
+        <label class="label" for="st-extra-args">附加 mpv 参数（每行一个）</label>
+        <textarea class="input textarea" id="st-extra-args" rows="4" spellcheck="false" placeholder="--hwdec=auto&#10;--cache=yes"></textarea>
+      </div>
+      <div class="field">
+        <label class="label" for="st-volume">默认音量（0-100）</label>
+        <input class="input input-narrow" id="st-volume" type="number" min="0" max="100" step="1" value="100">
+      </div>
+    </div>
+    <div class="modal-foot">
+      <span class="spacer"></span>
+      <button class="btn" type="button" data-close="1">取消</button>
+      <button class="btn btn-accent" id="st-btn-save" type="button">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 启动失败整页错误卡片 ============ -->
+<div class="boot-error hidden" id="boot-error">
+  <div class="boot-error-card">
+    <div class="boot-error-icon" aria-hidden="true">⚠</div>
+    <h2 class="boot-error-title">无法连接后端服务</h2>
+    <p class="boot-error-msg" id="boot-error-msg"></p>
+    <button class="btn btn-accent" id="boot-error-retry" type="button">重试</button>
+  </div>
+</div>
+
+<!-- ============ 提示条容器 ============ -->
+<div class="toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

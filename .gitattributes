@@ -1,0 +1,20 @@
+# 统一换行符：源码/文档用 LF；Windows 脚本用 CRLF
+# （.bat 如果是 LF 换行，cmd.exe 会把 if/set 解析错，报 `'""' 不是内部或外部命令`）
+* text=auto eol=lf
+
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+*.vbs text eol=crlf
+
+# 二进制
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.mp4 binary
+*.mkv binary
+*.exe binary
+*.dll binary

@@ -1,0 +1,7 @@
+1
+00:00:00,200 --> 00:00:03,000
+English subtitle: playing a WebDAV video with mpv.
+
+2
+00:00:03,500 --> 00:00:07,000
+If you can read this, the external subtitle was loaded automatically.

@@ -1,0 +1,36 @@
+# ============ 你本地的隐私数据：绝对不要提交 ============
+# 专辑配置（含明文密码）、设置、运行日志
+data/
+logs/
+*.log
+
+# 含你本人环境信息的截图 / 素材（本地保留，不发布）
+docs/private/
+
+# ============ 第三方二进制：请使用者自备 ============
+# mpv 体积约 150MB 且是 GPL 二进制，不随本仓库分发
+mpv/
+mpv-test/
+*.exe
+
+# ============ 运行/测试产生的临时目录 ============
+tools/.e2e/
+tools/.ui/
+tools/.uilive/
+tools/.probe/
+tools/.live/
+tools/.demo/
+tools/.lnktest/
+tools/.shot/
+tools/.rendercheck/
+tools/.storetest/
+
+# 生成的测试样片（可用 npm run testdata 重新生成）
+tools/testdata/**/*.mkv
+tools/testdata/**/*.mp4
+
+# 常规
+node_modules/
+Thumbs.db
+desktop.ini
+.DS_Store

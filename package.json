@@ -1,0 +1,28 @@
+{
+  "name": "mpv-webdav",
+  "version": "1.0.0",
+  "private": true,
+  "description": "本地网页版「专辑」管理器：浏览 WebDAV 目录并调用本机 mpv 播放，自动挂载同目录外挂字幕",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "tray": "pwsh -NoProfile -File tray.ps1",
+    "tray:test": "pwsh -NoProfile -File tray.ps1 -SelfTest",
+    "autostart": "pwsh -NoProfile -File tools/autostart.ps1 -Install",
+    "autostart:status": "pwsh -NoProfile -File tools/autostart.ps1 -Status",
+    "autostart:remove": "pwsh -NoProfile -File tools/autostart.ps1 -Uninstall",
+    "test": "node tools/e2e-test.js",
+    "test:store": "node tools/store-test.js",
+    "test:ipc": "node tools/e2e-test.js --require-ipc",
+    "test:ui": "node tools/ui-test.js",
+    "live-check": "node tools/live-check.js",
+    "probe:ipc": "node tools/probe-ipc.js",
+    "testdata": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/make-testdata.ps1",
+    "mock": "node tools/mock-webdav.js --root tools/testdata --port 8899 --base /dav --auth basic --user tester --pass secret"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {},
+  "license": "MIT"
+}
