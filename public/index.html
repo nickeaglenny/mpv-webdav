@@ -252,6 +252,18 @@
         </select>
         <div class="help">中文影视库的 .srt/.ass 常是 GBK 编码，mpv 按 UTF-8 解出来就是 <code>ÎÒh»á¹yz</code> 这种乱码。默认自动检测并转成 UTF-8 再交给 mpv。</div>
       </div>
+      <div class="field field-check">
+        <label class="check">
+          <input type="checkbox" id="st-mpv-ontop">
+          <span>播放时把 mpv 窗口置顶（推荐：按下播放就能直接看到画面；播放/暂停期间保持置顶，空闲后自动取消）</span>
+        </label>
+      </div>
+      <div class="field field-check">
+        <label class="check">
+          <input type="checkbox" id="st-mpv-fullscreen">
+          <span>播放时自动全屏 mpv（默认关闭。开启后按播放直接满屏；mpv 里按 <kbd>f</kbd> 仍可随时切换）</span>
+        </label>
+      </div>
       <div class="grid-2">
         <div class="field">
           <label class="label" for="st-alang">默认音轨语言 alang</label>

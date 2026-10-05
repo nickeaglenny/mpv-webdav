@@ -364,6 +364,21 @@ function readLog(file) {
     check('我们的 mpv 实例关闭了 resume-playback（续播由本应用自己管）',
       /--no-resume-playback/.test(mpvLog));
 
+    // --- 播放时的窗口行为（置顶默认开、自动全屏默认关）
+    check('mpv 启动参数带上了置顶/全屏设置',
+      /--ontop=/.test(mpvLog) && /--fullscreen=/.test(mpvLog),
+      (mpvLog.match(/--(?:no-)?ontop=\S+|--(?:no-)?fullscreen=\S+/g) || []).join(' '));
+    if (playing && playing.mode === 'ipc') {
+      if (typeof playing.ontop === 'boolean') {
+        check('IPC 播放中 mpv 处于置顶状态', playing.ontop === true, 'ontop=' + playing.ontop);
+        check('IPC 播放中未自动全屏（默认关闭）', playing.fullscreen === false, 'fullscreen=' + playing.fullscreen);
+      } else {
+        console.log('SKIP  置顶/全屏属性（--vo=null 无窗口时 mpv 不提供这些属性；参数下发已在上一条验证）');
+      }
+    } else {
+      check('回退模式按设置传入置顶参数', /--ontop=yes/.test(mpvLog), '--ontop=yes');
+    }
+
     // --- 「只记最近一次」续播
     r = await api('GET', '/api/resume');
     check('GET /api/resume 可用', r.status === 200 && !!(r.json && r.json.ok), JSON.stringify(r.json && r.json.resume));
@@ -422,6 +437,26 @@ function readLog(file) {
       r = await api('DELETE', '/api/resume');
       check('DELETE /api/resume 可用', r.status === 200 && !!(r.json && r.json.ok));
     }
+
+    // --- 置顶 / 自动全屏 开关（默认：置顶开、全屏关）
+    r = await api('PUT', '/api/settings', { mpvOntop: false, mpvAutoFullscreen: true });
+    check('设置里能关掉置顶、打开自动全屏',
+      !!(r.json && r.json.settings.mpvOntop === false && r.json.settings.mpvAutoFullscreen === true),
+      JSON.stringify(r.json && r.json.settings && { ontop: r.json.settings.mpvOntop, fs: r.json.settings.mpvAutoFullscreen }));
+
+    if (!playing || playing.mode !== 'ipc') {
+      // 回退模式每个文件重新起 mpv，参数应当立刻跟着设置变
+      await api('POST', '/api/play', { albumId: album.id, path: '/动画/样片二.mp4', mode: 'replace', loadSubs: false });
+      await sleep(1500);
+      const log2 = readLog(MPV_LOG);
+      check('回退模式：开关变化后 mpv 参数同步变化',
+        /--ontop=no/.test(log2) && /--fullscreen=yes/.test(log2));
+    } else {
+      console.log('SKIP  回退模式参数同步（IPC 模式是运行时 set_property，由置顶属性断言覆盖）');
+    }
+
+    r = await api('PUT', '/api/settings', { mpvOntop: true, mpvAutoFullscreen: false });
+    check('设置可以复原', !!(r.json && r.json.settings.mpvOntop === true && r.json.settings.mpvAutoFullscreen === false));
 
     // --- 优雅退出接口（托盘「退出」/脚本停止服务用）——放在最后，因为它会真的关掉服务
     r = await api('POST', '/api/shutdown', { token: 'wrong-token' });

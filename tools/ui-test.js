@@ -361,6 +361,11 @@ class Cdp {
     check('mpv 实际挂载了 3 条字幕轨', !!ps && ps.subtitleTracks === 3, ps ? 'subtitleTracks=' + ps.subtitleTracks : '');
     check('播放列表已同步到界面', (await cdp.eval('document.querySelectorAll("#queue-list [data-path], #queue-list .queue-item, #queue-list li, #queue-list div").length')) > 0);
 
+    // --- 浏览器标签页标题显示播放进度（切到别的标签也能看到播到哪了）
+    const tabTitle = await cdp.eval('document.title');
+    check('标签页标题显示播放进度', /^▶\s+\d+:\d\d\s*\/\s*\d+:\d\d\s+·\s+测试影片/.test(tabTitle), tabTitle);
+    check('标签页标题不是默认标题', tabTitle !== 'mpv WebDAV 专辑', tabTitle);
+
     const shot2 = await cdp.send('Page.captureScreenshot', { format: 'png' });
     fs.writeFileSync(path.join(WORK, 'ui-playing.png'), Buffer.from(shot2.data, 'base64'));
     check('已保存播放界面截图', fs.existsSync(path.join(WORK, 'ui-playing.png')));

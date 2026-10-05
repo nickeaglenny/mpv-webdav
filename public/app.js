@@ -1242,6 +1242,25 @@ function renderPlayer() {
 
   var qToggle = $('#queue-toggle');
   if (qToggle) qToggle.textContent = (active && !p.paused) ? '⏸ 暂停' : '▶ 播放';
+
+  renderTabTitle();
+}
+
+/** 浏览器标签页标题显示播放进度：切到别的标签也能看到播到哪了。 */
+function renderTabTitle() {
+  var p = state.player || emptyPlayer();
+  var base = 'mpv WebDAV 专辑';
+  var hasMedia = !!(p.mediaTitle || p.path) && (p.running || !p.idle);
+  if (!hasMedia) {
+    if (document.title !== base) document.title = base;
+    return;
+  }
+  var mark = p.paused ? '⏸' : '▶';
+  var name = p.mediaTitle || basename(p.path || '');
+  if (name.length > 40) name = name.slice(0, 39) + '…';
+  var time = fmtClock(p.position) + (p.duration > 0 ? ' / ' + fmtClock(p.duration) : '');
+  var next = mark + ' ' + time + ' · ' + name;
+  if (document.title !== next) document.title = next;
 }
 
 function sendPlayerAction(action, value) {
@@ -1558,6 +1577,8 @@ function openSettingsDialog() {
   $('#st-sub-dirs').value = listToText(st.subDirs);
   $('#st-sub-fallback').checked = st.subFallbackSingleVideo !== false;
   $('#st-sub-encoding').value = st.subEncoding || 'auto';
+  $('#st-mpv-ontop').checked = st.mpvOntop !== false;
+  $('#st-mpv-fullscreen').checked = st.mpvAutoFullscreen === true;
   $('#st-alang').value = st.alang || '';
   $('#st-slang').value = st.slang || '';
   $('#st-extra-args').value = Array.isArray(st.extraMpvArgs) ? st.extraMpvArgs.join('\n') : '';
@@ -1584,6 +1605,8 @@ function saveSettingsFromDialog() {
     subDirs: parseList($('#st-sub-dirs').value),
     subFallbackSingleVideo: !!$('#st-sub-fallback').checked,
     subEncoding: $('#st-sub-encoding').value,
+    mpvOntop: !!$('#st-mpv-ontop').checked,
+    mpvAutoFullscreen: !!$('#st-mpv-fullscreen').checked,
     alang: $('#st-alang').value.trim(),
     slang: $('#st-slang').value.trim(),
     extraMpvArgs: String($('#st-extra-args').value || '').split(/\r?\n/)

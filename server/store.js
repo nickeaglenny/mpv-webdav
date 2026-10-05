@@ -26,6 +26,9 @@ const DEFAULT_SETTINGS = {
   resumeMinSeconds: 30,
   resumeMinPercent: 5,
   resumeEndGuardSeconds: 60,
+  // 播放时的 mpv 窗口行为
+  mpvOntop: true,             // 播放中把 mpv 窗口置顶（空闲时自动取消，避免挡住桌面）
+  mpvAutoFullscreen: false,   // 播放中自动全屏（默认关闭）
 };
 
 function ensureDir(dir) {
@@ -215,6 +218,8 @@ class Store {
       const v = parseInt(src[key], 10);
       next[key] = Number.isFinite(v) && v >= 0 ? v : next[key];
     }
+    if (src.mpvOntop !== undefined) next.mpvOntop = !!src.mpvOntop;
+    if (src.mpvAutoFullscreen !== undefined) next.mpvAutoFullscreen = !!src.mpvAutoFullscreen;
     for (const key of ['videoExts', 'audioExts', 'subExts', 'subDirs', 'extraMpvArgs']) {
       if (src[key] === undefined) continue;
       const value = src[key];

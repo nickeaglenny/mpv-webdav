@@ -154,6 +154,8 @@ class MpvController extends EventEmitter {
       subtitles: [],
       subtitleTracks: 0,
       resumedFrom: 0,
+      ontop: false,
+      fullscreen: false,
       error: null,
       mode: null,
       updatedAt: Date.now(),
@@ -204,6 +206,33 @@ class MpvController extends EventEmitter {
     return ['--no-save-position-on-quit', '--no-resume-playback'];
   }
 
+  // 播放中按设置给 mpv 开「置顶 / 自动全屏」；空闲时一律取消（空窗口不该盖住桌面）。
+  // 只做「授予」，不在播放中强制关闭——否则用户自己按 f 全屏后，一切集就被踢出来。
+  _syncWindowState() {
+    if (this.mode !== 'ipc' || !this.ipc || !this.ipc.connected) return;
+    const s = this.store.settings;
+    const playing = !!(this.state.running && !this.state.idle);
+    if (playing) {
+      if (s.mpvOntop) this.ipc.send(['set_property', 'ontop', true]).catch(() => {});
+      if (s.mpvAutoFullscreen) this.ipc.send(['set_property', 'fullscreen', true]).catch(() => {});
+    } else {
+      this.ipc.send(['set_property', 'ontop', false]).catch(() => {});
+      this.ipc.send(['set_property', 'fullscreen', false]).catch(() => {});
+    }
+  }
+
+  // 设置里改了「播放时置顶 / 自动全屏」：立刻作用到正在运行的 mpv
+  applySettingChange(name) {
+    if (this.mode !== 'ipc' || !this.ipc || !this.ipc.connected) return;
+    const s = this.store.settings;
+    const playing = !!(this.state.running && !this.state.idle);
+    if (name === 'mpvOntop') {
+      this.ipc.send(['set_property', 'ontop', !!(s.mpvOntop && playing)]).catch(() => {});
+    } else if (name === 'mpvAutoFullscreen') {
+      this.ipc.send(['set_property', 'fullscreen', !!(s.mpvAutoFullscreen && playing)]).catch(() => {});
+    }
+  }
+
   baseArgs() {
     const s = this.store.settings;
     const args = [
@@ -212,6 +241,10 @@ class MpvController extends EventEmitter {
       '--keep-open=no',
       '--idle=yes',
       ...this.isolationArgs(),
+      // 启动时（还没开始播）不要置顶也不要全屏：空窗口不该盖住桌面。
+      // 真正开始播放时再用 set_property 打开，见 _syncWindowState()。
+      '--ontop=no',
+      '--fullscreen=no',
     ];
     if (s.alang) args.push('--alang=' + s.alang);
     if (s.slang) args.push('--slang=' + s.slang);
@@ -227,6 +260,9 @@ class MpvController extends EventEmitter {
       '--force-window=yes',
       '--keep-open=yes',
       ...this.isolationArgs(),
+      // 回退模式每个进程就播一个文件，直接按设置给参数
+      '--ontop=' + (s.mpvOntop ? 'yes' : 'no'),
+      '--fullscreen=' + (s.mpvAutoFullscreen ? 'yes' : 'no'),
       item.url,
       '--force-media-title=' + (item.title || item.name || ''),
     ];
@@ -325,7 +361,7 @@ class MpvController extends EventEmitter {
     const props = [
       'idle-active', 'pause', 'time-pos', 'duration', 'volume', 'mute',
       'media-title', 'path', 'filename', 'playlist', 'playlist-pos', 'playlist-count',
-      'eof-reached', 'keep-open', 'track-list',
+      'eof-reached', 'keep-open', 'track-list', 'ontop', 'fullscreen',
     ];
     props.forEach((name, i) => {
       ipc.send(['observe_property', i + 1, name]).catch(() => {});
@@ -339,7 +375,8 @@ class MpvController extends EventEmitter {
         switch (msg.name) {
           case 'idle-active':
             s.idle = !!msg.data;
-            if (s.idle) { s.running = false; s.position = 0; }
+            // 只在「变成空闲」时同步窗口状态；开始播放交给 start-file 处理
+            if (s.idle) { s.running = false; s.position = 0; this._syncWindowState(); }
             break;
           case 'pause':
             s.paused = !!msg.data;
@@ -374,6 +411,12 @@ class MpvController extends EventEmitter {
               ? msg.data.filter((t) => t && t.type === 'sub' && !t.dependent).length
               : 0;
             break;
+          case 'ontop':
+            s.ontop = !!msg.data;
+            break;
+          case 'fullscreen':
+            s.fullscreen = !!msg.data;
+            break;
           default:
             break;
         }
@@ -383,11 +426,13 @@ class MpvController extends EventEmitter {
         s.running = true;
         s.idle = false;
         s.eof = false;
+        this._syncWindowState();
         break;
       case 'file-loaded':
         s.running = true;
         s.idle = false;
         s.error = null;
+        this._syncWindowState();
         break;
       case 'end-file':
         if (msg.reason === 'error') {
@@ -397,6 +442,7 @@ class MpvController extends EventEmitter {
       case 'idle':
         s.idle = true;
         s.running = false;
+        this._syncWindowState();
         break;
       default:
         break;
