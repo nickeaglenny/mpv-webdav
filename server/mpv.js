@@ -153,6 +153,7 @@ class MpvController extends EventEmitter {
       subtitleCount: 0,
       subtitles: [],
       subtitleTracks: 0,
+      resumedFrom: 0,
       error: null,
       mode: null,
       updatedAt: Date.now(),
@@ -195,6 +196,14 @@ class MpvController extends EventEmitter {
     try { return !!p && fs.existsSync(p); } catch { return false; }
   }
 
+  // 我们自己的 mpv 实例与用户直接用 mpv 打开文件的世界完全隔离：
+  //   --no-save-position-on-quit : 绝不往 mpv 的全局 watch_later 目录写东西
+  //   --no-resume-playback       : 绝不读取那些东西（续播由本应用自己的记录负责）
+  // 这样即使 mpv.conf 里开了 save-position-on-quit，也不会互相污染。
+  isolationArgs() {
+    return ['--no-save-position-on-quit', '--no-resume-playback'];
+  }
+
   baseArgs() {
     const s = this.store.settings;
     const args = [
@@ -202,6 +211,7 @@ class MpvController extends EventEmitter {
       '--force-window=yes',
       '--keep-open=no',
       '--idle=yes',
+      ...this.isolationArgs(),
     ];
     if (s.alang) args.push('--alang=' + s.alang);
     if (s.slang) args.push('--slang=' + s.slang);
@@ -216,9 +226,11 @@ class MpvController extends EventEmitter {
       '--no-terminal',
       '--force-window=yes',
       '--keep-open=yes',
+      ...this.isolationArgs(),
       item.url,
       '--force-media-title=' + (item.title || item.name || ''),
     ];
+    if (Number.isFinite(item.start) && item.start > 0) args.push('--start=' + item.start);
     if (s.alang) args.push('--alang=' + s.alang);
     if (s.slang) args.push('--slang=' + s.slang);
     if (s.volume != null) args.push('--volume=' + s.volume);
@@ -494,6 +506,7 @@ class MpvController extends EventEmitter {
     this.state.albumId = first.albumId;
     this.state.path = first.path;
     this.state.mediaTitle = first.title || first.name;
+    this.state.resumedFrom = Number.isFinite(first.start) && first.start > 0 ? first.start : 0;
     this.state.running = true;
     this.state.idle = false;
     this.emitState(true);
@@ -503,7 +516,8 @@ class MpvController extends EventEmitter {
   async _loadfile(item, flags) {
     const urls = (item.subUrls || []).slice();
     const title = item.title || item.name || '';
-    const attempts = this._buildLoadAttempts(item.url, flags, urls, title);
+    const startAt = Number.isFinite(item.start) && item.start > 0 ? item.start : null;
+    const attempts = this._buildLoadAttempts(item.url, flags, urls, title, startAt);
     const start = this.subStrategy == null ? 0 : Math.min(this.subStrategy, attempts.length - 1);
 
     for (let i = start; i < attempts.length; i++) {
@@ -535,9 +549,11 @@ class MpvController extends EventEmitter {
 
   // mpv versions differ in how loadfile accepts the per-file options argument,
   // so build several equivalent spellings and keep the first one that works.
-  _buildLoadAttempts(url, flags, subUrls, title) {
+  _buildLoadAttempts(url, flags, subUrls, title, startAt = null) {
     const listSep = process.platform === 'win32' ? ';' : ':';
     const titleOpts = title ? { 'force-media-title': title } : {};
+    // 续播位置：key/value list 的值必须是字符串，数字会被判为类型不符
+    if (startAt) titleOpts.start = startAt.toFixed(3);
     const attempts = [];
 
     if (subUrls.length) {
@@ -554,7 +570,11 @@ class MpvController extends EventEmitter {
             await this.ipc.send(['change-list', 'sub-files', 'append', sub]);
           }
           if (title) await this.ipc.send(['set_property', 'force-media-title', title]).catch(() => {});
-          return this.ipc.send(['loadfile', url, flags, -1]);
+          await this.ipc.send(['loadfile', url, flags, -1]);
+          // set_property start 不一定存在，退而求其次：加载后绝对跳转
+          if (startAt) {
+            await this.ipc.send(['seek', startAt, 'absolute']).catch(() => {});
+          }
         },
       });
       // 3) options argument as a plain string (legacy key/value syntax)
@@ -569,9 +589,12 @@ class MpvController extends EventEmitter {
     attempts.push({
       run: async () => {
         if (title) await this.ipc.send(['set_property', 'force-media-title', title]).catch(() => {});
-        return subUrls.length
-          ? this.ipc.send(['loadfile', url, flags, -1])
-          : this.ipc.send(['loadfile', url, flags, -1, titleOpts]);
+        if (subUrls.length) {
+          await this.ipc.send(['loadfile', url, flags, -1]);
+        } else {
+          await this.ipc.send(['loadfile', url, flags, -1, titleOpts]);
+        }
+        if (startAt) await this.ipc.send(['seek', startAt, 'absolute']).catch(() => {});
       },
     });
 
@@ -623,6 +646,7 @@ class MpvController extends EventEmitter {
     this.state.mediaTitle = item.title || item.name;
     this.state.subtitles = (item.subNames || []).slice();
     this.state.subtitleCount = this.state.subtitles.length;
+    this.state.resumedFrom = Number.isFinite(item.start) && item.start > 0 ? item.start : 0;
     this.state.playlistPos = index;
     this.state.playlist = this.queue.map((it, i) => ({
       index: i, title: it.title || it.name, path: it.path, albumId: it.albumId, playing: i === index,

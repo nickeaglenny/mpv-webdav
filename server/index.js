@@ -12,6 +12,7 @@ const { Store } = require('./store');
 const { WebDAVClient, WebDAVError, normalizeRel } = require('./webdav');
 const media = require('./media');
 const textEncoding = require('./text-encoding');
+const resume = require('./resume');
 const { MpvController } = require('./mpv');
 
 const ROOT = path.join(__dirname, '..');
@@ -34,8 +35,77 @@ const mpv = new MpvController({ store });
 const sseClients = new Set();
 const clientCache = new Map();
 
-mpv.on('player', (state) => broadcast('player', state));
+mpv.on('player', (state) => {
+  resumeOnPlayerEvent(state);
+  broadcast('player', state);
+});
 mpv.on('log', (entry) => broadcast('log', entry));
+
+// ---------------------------------------------- 「只记最近一次」播放进度 ---
+// 数据来源就是播放器状态里的 time-pos（IPC 模式每 ~400ms 一次），
+// 节流写盘：播放中最多每 30 秒一次，暂停/停止/切集/退出时立即写。
+const RESUME_FLUSH_MS = 30000;
+const resumeTracker = { albumId: null, path: null, name: '', pos: 0, dur: 0, size: null, mtime: null };
+let lastPlayedMeta = null;      // handlePlay 写入：{ albumId, path, name, size, mtime }
+let lastResumeFlush = 0;
+let wasRunning = false;
+
+function resumeFlush(force = false) {
+  if (!resumeTracker.albumId || !resumeTracker.path) return;
+  const now = Date.now();
+  if (!force && now - lastResumeFlush < RESUME_FLUSH_MS) return;
+  lastResumeFlush = now;
+  const verdict = resume.decide(resumeTracker.pos, resumeTracker.dur, store.settings);
+  if (verdict === 'remember') {
+    store.setResume(resume.buildRecord({
+      albumId: resumeTracker.albumId,
+      path: resumeTracker.path,
+      name: resumeTracker.name,
+      pos: resumeTracker.pos,
+      dur: resumeTracker.dur,
+      size: resumeTracker.size,
+      mtime: resumeTracker.mtime,
+    }, now));
+  } else if (verdict === 'clear') {
+    // 只有「正在播的这个文件」自己不该记时才清；否则保留上一条
+    // （刚开播另一部片子时不应该把上次那部的进度抹掉）
+    const stored = store.getResume();
+    if (stored && stored.albumId === resumeTracker.albumId && stored.path === resumeTracker.path) {
+      store.clearResume();
+    }
+  }
+}
+
+function resumeOnPlayerEvent(state) {
+  if (!state) return;
+  // 停止 / 播完 / 暂停：先把上一刻的位置落盘（此时 state.position 可能已被清零）
+  if (wasRunning && (!state.running || state.paused)) resumeFlush(true);
+
+  const sameItem = resumeTracker.albumId === state.albumId && resumeTracker.path === state.path;
+  if (!sameItem) {
+    if (resumeTracker.path) resumeFlush(true);
+    resumeTracker.albumId = state.albumId || null;
+    resumeTracker.path = state.path || null;
+    resumeTracker.name = state.mediaTitle || '';
+    resumeTracker.pos = 0;
+    resumeTracker.dur = 0;
+    const meta = lastPlayedMeta;
+    const known = meta && meta.albumId === state.albumId && meta.path === state.path ? meta : null;
+    resumeTracker.size = known ? known.size : null;
+    resumeTracker.mtime = known ? known.mtime : null;
+    if (known && known.name) resumeTracker.name = known.name;
+    // 刚换片时位置还没有意义：等满一个节流周期或等停止/暂停时再写，
+    // 避免"刚开始播就把上一条记录清掉"。
+    lastResumeFlush = Date.now();
+  }
+
+  if (Number.isFinite(state.duration) && state.duration > 0) resumeTracker.dur = state.duration;
+  if (Number.isFinite(state.position) && state.position > 0) resumeTracker.pos = state.position;
+  if (state.mediaTitle) resumeTracker.name = state.mediaTitle;
+
+  if (state.running && !state.idle) resumeFlush(false);
+  wasRunning = state.running;
+}
 
 // ---------------------------------------------------------------- helpers ---
 function broadcast(event, data) {
@@ -148,6 +218,7 @@ async function buildState() {
     },
     settings: store.publicSettings(),
     albums: store.listAlbums(),
+    resume: store.getResume(),
     player: mpv.getState(),
   };
 }
@@ -263,6 +334,20 @@ async function handlePlay(body) {
     }
   }
 
+  // 「只记最近一次」续播：只有在看的就是上次那个文件、且大小/时间没变时才跳转。
+  // body.size / body.mtime 由前端从目录列表带过来，避免额外一次 PROPFIND。
+  const stored = store.getResume();
+  const size = Number.isFinite(body.size) ? body.size : null;
+  const mtime = body.mtime || null;
+  let startAt = null;
+  if (resume.matches(stored, { albumId: album.id, path: rel, size, mtime })) {
+    if (body.resume === false) {
+      store.clearResume();          // 「从头播放」：顺手把旧进度清掉
+    } else {
+      startAt = stored.pos;
+    }
+  }
+
   const item = {
     albumId: album.id,
     path: rel,
@@ -272,10 +357,22 @@ async function handlePlay(body) {
     subUrls: subtitles.map((s) => streamUrl(album.id, s.path)),
     subNames: subtitles.map((s) => s.name),
   };
+  if (startAt) item.start = startAt;
+  lastPlayedMeta = { albumId: album.id, path: rel, name, size, mtime };
 
   const mode = body.mode === 'append' ? 'append' : 'replace';
+  if (startAt) {
+    mpv.emit('log', { level: 'info', message: `从上次位置继续：${resume.describe(stored)}` });
+  }
   const player = await mpv.play([item], { mode });
-  return { ok: true, item: { albumId: album.id, path: rel, name, title: name }, subtitles: item.subNames, player };
+  return {
+    ok: true,
+    item: { albumId: album.id, path: rel, name, title: name },
+    subtitles: item.subNames,
+    resumed: startAt,
+    resumedText: startAt ? resume.describe(stored) : '',
+    player,
+  };
 }
 
 // --------------------------------------------------------------- streaming --
@@ -489,6 +586,16 @@ async function route(req, res, parsed) {
     }
   }
 
+  // ---- 最近一次播放进度（只记一条）
+  if (pathname === '/api/resume' && method === 'GET') {
+    const rec = store.getResume();
+    return sendJson(res, 200, { ok: true, resume: rec, text: rec ? resume.describe(rec) : '' });
+  }
+  if (pathname === '/api/resume' && method === 'DELETE') {
+    store.clearResume();
+    return sendJson(res, 200, { ok: true, resume: null });
+  }
+
   // ---- browse
   if (pathname === '/api/browse' && method === 'GET') {
     return sendJson(res, 200, await handleBrowse({
@@ -601,6 +708,7 @@ async function gracefulShutdown(reason) {
   if (shuttingDown) return;
   shuttingDown = true;
   if (reason !== 'api') console.log('\n正在关闭…');
+  try { resumeFlush(true); } catch { /* 退出前尽力保存进度 */ }
   for (const res of sseClients) { try { res.write('event: bye\ndata: {}\n\n'); res.end(); } catch {} }
   try { await mpv.shutdown(); } catch { /* ignore */ }
   server.close(() => process.exit(0));

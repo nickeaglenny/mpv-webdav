@@ -13,6 +13,8 @@
     "autostart:remove": "pwsh -NoProfile -File tools/autostart.ps1 -Uninstall",
     "test": "node tools/e2e-test.js",
     "test:store": "node tools/store-test.js",
+    "test:resume": "node tools/resume-test.js",
+    "test:encoding": "node tools/encoding-test.js",
     "test:ipc": "node tools/e2e-test.js --require-ipc",
     "test:ui": "node tools/ui-test.js",
     "live-check": "node tools/live-check.js",

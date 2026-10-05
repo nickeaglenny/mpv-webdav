@@ -215,8 +215,12 @@ class Cdp {
     await httpJson(`http://127.0.0.1:${APP_PORT}/api/settings`, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        extraMpvArgs: ['--vo=null', '--ao=null', '--force-window=no', '--length=25',
+        extraMpvArgs: ['--vo=null', '--ao=null', '--force-window=no', '--length=5',
           '--msg-level=all=info', '--log-file=' + path.join(WORK, 'mpv.log')],
+        // 测试片只有 12 秒：把阈值调小，才能在测试里看到「续播」
+        resumeMinSeconds: 1,
+        resumeMinPercent: 1,
+        resumeEndGuardSeconds: 1,
       }),
     });
 
@@ -360,6 +364,32 @@ class Cdp {
     const shot2 = await cdp.send('Page.captureScreenshot', { format: 'png' });
     fs.writeFileSync(path.join(WORK, 'ui-playing.png'), Buffer.from(shot2.data, 'base64'));
     check('已保存播放界面截图', fs.existsSync(path.join(WORK, 'ui-playing.png')));
+
+    // --- 「继续观看」：等进度落盘后按钮应出现，点它能续播
+    let rec = null;
+    for (let i = 0; i < 30; i++) {
+      await sleep(500);
+      const rr = await httpJson(`http://127.0.0.1:${APP_PORT}/api/resume`);
+      rec = rr.json && rr.json.resume;
+      if (rec && rec.pos > 0) break;
+      rec = null;
+    }
+    check('播放结束后服务端记录了进度', !!rec, rec ? `pos=${rec.pos} name=${rec.name}` : '没等到记录');
+    if (rec) {
+      await cdp.eval('refreshState()');     // 让页面把记录读回来
+      await cdp.waitFor('!document.querySelector("#btn-resume").classList.contains("hidden")', 10000, '继续观看按钮出现');
+      const chipText = await cdp.eval('document.querySelector("#btn-resume").textContent.trim()');
+      check('工具栏出现「继续观看」按钮', /继续/.test(chipText), chipText);
+      check('按钮上显示的不是 0:00', !/继续\s*0:00/.test(chipText), chipText);
+
+      const chipPoint = await cdp.center('document.querySelector("#btn-resume")');
+      await cdp.realClick(chipPoint.x, chipPoint.y);
+      await sleep(2000);
+      const p2 = await httpJson(`http://127.0.0.1:${APP_PORT}/api/player`);
+      const pos = p2.json && p2.json.player && p2.json.player.position;
+      check('点「继续观看」后从上次位置接着播', typeof pos === 'number' && pos >= rec.pos - 1.5,
+        `position=${pos} 期望≈${rec.pos}`);
+    }
 
     // --- settings dialog: 点遮罩不应该关闭
     await cdp.eval('document.querySelector("#btn-settings").click()');

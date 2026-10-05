@@ -145,6 +145,9 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; colo
 .btn-sm { height: 25px; padding: 0 9px; font-size: 12px; }
 .btn-accent { background: var(--accent); border-color: var(--accent); color: #06121d; font-weight: 600; }
 .btn-accent:hover:not(:disabled) { background: #58b4ff; border-color: #58b4ff; }
+/* 「继续观看」：比主按钮弱、比普通按钮醒目 */
+.btn-resume { color: var(--accent); border-color: rgba(62, 166, 255, .5); background: var(--accent-soft); }
+.btn-resume:hover:not(:disabled) { background: rgba(62, 166, 255, .22); border-color: var(--accent); }
 .btn-icon { width: 30px; height: 30px; padding: 0; font-size: 14px; }
 .btn-danger { color: var(--err); }
 .btn-danger:hover:not(:disabled) { background: rgba(255, 107, 107, .14); border-color: rgba(255, 107, 107, .5); }

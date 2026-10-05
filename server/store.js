@@ -22,6 +22,10 @@ const DEFAULT_SETTINGS = {
   // auto = 自动检测编码并转成 UTF-8；off = 原样转发交给 mpv；也可强制某个编码
   subEncoding: 'auto',
   subTranscodeMaxBytes: 8 * 1024 * 1024,
+  // 「只记最近一次」的播放进度阈值（见 server/resume.js）
+  resumeMinSeconds: 30,
+  resumeMinPercent: 5,
+  resumeEndGuardSeconds: 60,
 };
 
 function ensureDir(dir) {
@@ -71,6 +75,7 @@ class Store {
     this.dataDir = dataDir;
     this.albumsFile = path.join(dataDir, 'albums.json');
     this.settingsFile = path.join(dataDir, 'settings.json');
+    this.resumeFile = path.join(dataDir, 'last-played.json');
     ensureDir(dataDir);
 
     const albumsRead = readJsonWithBackup(this.albumsFile);
@@ -88,10 +93,31 @@ class Store {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, settingsValue);
     if (!this.settings.mpvPath) this.settings.mpvPath = defaultMpvPath;
     if (settingsRead.recovered) this.saveSettings({ backup: false });
+
+    // 「只记最近一次」的播放进度：只有一个文件、一条记录
+    const resumeRead = readJsonWithBackup(this.resumeFile);
+    this.resume = resumeRead.value && typeof resumeRead.value === 'object' ? resumeRead.value : null;
   }
 
   saveAlbums(opts) { writeJsonAtomic(this.albumsFile, this.albums, opts); }
   saveSettings(opts) { writeJsonAtomic(this.settingsFile, this.settings, opts); }
+  saveResume(opts) { writeJsonAtomic(this.resumeFile, this.resume, opts); }
+
+  // ---- 最近一次播放进度 ---------------------------------------------------
+  getResume() { return this.resume; }
+
+  setResume(record) {
+    this.resume = record;
+    this.saveResume();
+    return this.resume;
+  }
+
+  clearResume() {
+    if (this.resume === null) return null;
+    this.resume = null;
+    this.saveResume();
+    return null;
+  }
 
   // ---- albums -------------------------------------------------------------
   static sanitize(input, existing) {
@@ -183,6 +209,11 @@ class Store {
     }
     if (src.subTranscodeMaxBytes !== undefined) {
       next.subTranscodeMaxBytes = Math.min(64 * 1024 * 1024, Math.max(64 * 1024, parseInt(src.subTranscodeMaxBytes, 10) || 8 * 1024 * 1024));
+    }
+    for (const key of ['resumeMinSeconds', 'resumeMinPercent', 'resumeEndGuardSeconds']) {
+      if (src[key] === undefined) continue;
+      const v = parseInt(src[key], 10);
+      next[key] = Number.isFinite(v) && v >= 0 ? v : next[key];
     }
     for (const key of ['videoExts', 'audioExts', 'subExts', 'subDirs', 'extraMpvArgs']) {
       if (src[key] === undefined) continue;

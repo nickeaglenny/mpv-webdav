@@ -155,6 +155,10 @@ function readLog(file) {
         '--msg-level=all=info',
         '--log-file=' + MPV_LOG,
       ],
+      // 测试片只有 12 秒，把阈值调小才能验证「记住进度」
+      resumeMinSeconds: 1,
+      resumeMinPercent: 1,
+      resumeEndGuardSeconds: 1,
     });
     check('PUT /api/settings 生效', r.status === 200 && r.json && r.json.ok === true);
 
@@ -200,6 +204,10 @@ function readLog(file) {
     check('视频被识别为 video', !!video && video.kind === 'video', video ? `kind=${video.kind} size=${video.size}` : '');
     check('同目录字幕计数 = 2', !!video && video.subtitleCount === 2, video ? 'subtitleCount=' + video.subtitleCount : '');
     check('识别出未播放文件类型', movieEntries.some((e) => e.kind === 'other') || true);
+
+    check('state 包含续播字段（初始为 null）',
+      Object.prototype.hasOwnProperty.call(state0 || {}, 'resume'),
+      JSON.stringify(state0 && state0.resume));
 
     // --- stream proxy + Range
     const token = state0.streamToken;
@@ -349,6 +357,71 @@ function readLog(file) {
     const mockText = readLog(mockLog);
     check('mock 服务器收到 PROPFIND', /PROPFIND/.test(mockText));
     check('mpv 通过代理发起了 Range 请求', /Range=bytes=/.test(mockText));
+
+    // --- 与「外部直接用 mpv 打开文件」的隔离保证
+    check('我们的 mpv 实例关闭了 save-position-on-quit（不写用户全局 watch_later）',
+      /--no-save-position-on-quit/.test(mpvLog));
+    check('我们的 mpv 实例关闭了 resume-playback（续播由本应用自己管）',
+      /--no-resume-playback/.test(mpvLog));
+
+    // --- 「只记最近一次」续播
+    r = await api('GET', '/api/resume');
+    check('GET /api/resume 可用', r.status === 200 && !!(r.json && r.json.ok), JSON.stringify(r.json && r.json.resume));
+
+    if (playing && playing.mode === 'ipc') {
+      // 换回测试影片，等它播到 --length=6 结束（结束时会强制落盘一次进度）
+      await api('POST', '/api/play', {
+        albumId: album.id, path: '/电影/测试影片.mkv', mode: 'replace', loadSubs: true,
+        size: video.size, mtime: video.mtime,
+      });
+      let rec = null;
+      for (let i = 0; i < 30; i++) {           // 最多等 ~15 秒
+        await sleep(500);
+        const rr = await api('GET', '/api/resume');
+        rec = rr.json && rr.json.resume;
+        if (rec && rec.path === '/电影/测试影片.mkv' && rec.pos > 0) break;
+        rec = null;
+      }
+      check('IPC 模式下自动记录了进度（只记一条）', !!rec,
+        rec ? `pos=${rec.pos} dur=${rec.dur} name=${rec.name}` : '没等到记录');
+      if (rec) {
+        check('记录里带 size（用于被动校验，避免文件换了还续播）',
+          rec.size === video.size, `size=${rec.size} 期望=${video.size}`);
+        check('记录里的路径正确', rec.path === '/电影/测试影片.mkv', rec.path);
+
+        // 再次播放同一文件：应当带上续播位置
+        r = await api('POST', '/api/play', {
+          albumId: album.id, path: '/电影/测试影片.mkv', mode: 'replace', loadSubs: true,
+          size: video.size, mtime: video.mtime,
+        });
+        check('再次播放同一文件时请求带上了续播位置', !!(r.json && r.json.resumed > 0),
+          `resumed=${r.json && r.json.resumed} text=${r.json && r.json.resumedText}`);
+        await sleep(1500);
+        const posRes = await api('GET', '/api/player');
+        const pos = posRes.json.player.position;
+        check('mpv 实际跳到了上次的位置', pos >= rec.pos - 1.5, `position=${pos} 期望≈${rec.pos}`);
+
+        // 文件大小变了 → 视为另一个版本，不续播
+        r = await api('POST', '/api/play', {
+          albumId: album.id, path: '/电影/测试影片.mkv', mode: 'replace', loadSubs: true,
+          size: video.size + 1,
+        });
+        check('文件大小变了就不续播（被动失效）', !r.json.resumed, `resumed=${r.json.resumed}`);
+
+        // 「从头播放」应清掉记录
+        r = await api('POST', '/api/play', {
+          albumId: album.id, path: '/电影/测试影片.mkv', mode: 'replace', loadSubs: true,
+          size: video.size, mtime: video.mtime, resume: false,
+        });
+        check('「从头播放」不续播且清掉记录', !r.json.resumed, `resumed=${r.json.resumed}`);
+        r = await api('GET', '/api/resume');
+        check('记录已被清除', !(r.json && r.json.resume), JSON.stringify(r.json && r.json.resume));
+      }
+    } else {
+      console.log('SKIP  IPC 续播记录（当前是回退模式，无法采集播放位置；恢复路径由单测覆盖）');
+      r = await api('DELETE', '/api/resume');
+      check('DELETE /api/resume 可用', r.status === 200 && !!(r.json && r.json.ok));
+    }
 
     // --- 优雅退出接口（托盘「退出」/脚本停止服务用）——放在最后，因为它会真的关掉服务
     r = await api('POST', '/api/shutdown', { token: 'wrong-token' });

@@ -21,7 +21,8 @@ var API = {
   play:     '/api/play',
   player:   '/api/player',
   events:   '/api/events',
-  settings: '/api/settings'
+  settings: '/api/settings',
+  resume:   '/api/resume'
 };
 
 var STORAGE_KEY  = 'mpvwebdav.ui';
@@ -66,6 +67,7 @@ var state = {
   search: '',
   selIndex: -1,
   subCache: {},              /* path -> [字幕文件名] */
+  resume: null,              /* 最近一次播放进度（只记一条） */
   draggingSeek: false,
   seekPreview: 0,
   draggingVol: false,
@@ -304,6 +306,21 @@ function apiTestAlbum(payload) { return api('POST', API.albums + '/test', payloa
 function apiPlay(payload) { return api('POST', API.play, payload); }
 function apiPlayer(payload) { return api('POST', API.player, payload); }
 function apiSaveSettings(partial) { return api('PUT', API.settings, partial); }
+function apiGetResume() { return api('GET', API.resume); }
+function apiClearResume() { return api('DELETE', API.resume); }
+
+/** 重新读取「最近一次播放进度」（quiet=true 时不弹错误提示）。 */
+function refreshResume(quiet) {
+  return apiGetResume().then(function (res) {
+    state.resume = (res && res.resume) || null;
+    renderResume();
+    renderListing();
+    return state.resume;
+  }).catch(function (err) {
+    if (!quiet) toast('error', '读取续播记录失败：' + err.message);
+    return null;
+  });
+}
 
 /* ============================ 5. Toast 与状态栏 ============================ */
 
@@ -731,6 +748,7 @@ function renderToolbar() {
 
 function renderBrowser() {
   renderToolbar();
+  renderResume();
   renderBreadcrumb();
   renderListing();
   if (state.browse.albumId && !state.browse.loading && !state.browse.error) {
@@ -807,21 +825,99 @@ function markSelected(node, index) {
   if (node && node.classList) node.classList.add('is-selected');
 }
 
+/* ---------- 最近一次播放进度（只记一条） ---------- */
+
+function fmtClock(sec) {
+  var s = Math.max(0, Math.floor(Number(sec) || 0));
+  var h = Math.floor(s / 3600);
+  var m = Math.floor((s % 3600) / 60);
+  var ss = s % 60;
+  function p(x) { return (x < 10 ? '0' : '') + x; }
+  return h > 0 ? h + ':' + p(m) + ':' + p(ss) : m + ':' + p(ss);
+}
+
+function resumeEntry() {
+  var rec = state.resume;
+  if (!rec) return null;
+  return {
+    path: rec.path,
+    name: rec.name || basename(rec.path),
+    size: rec.size,
+    mtime: rec.mtime,
+    kind: 'video'
+  };
+}
+
+function isResumeFor(entry) {
+  var rec = state.resume;
+  if (!rec || !entry || entry.isDir) return false;
+  if (rec.albumId !== state.browse.albumId || rec.path !== entry.path) return false;
+  if (typeof entry.size === 'number' && rec.size != null && entry.size !== rec.size) return false;
+  return true;
+}
+
+/** 工具栏上的「继续观看」按钮：仅当记录属于当前专辑时显示。 */
+function renderResume() {
+  var btn = $('#btn-resume');
+  if (!btn) return;
+  var rec = state.resume;
+  var album = currentAlbum();
+  var show = !!(rec && rec.path && album && rec.albumId === album.id);
+  btn.classList.toggle('hidden', !show);
+  if (!show) return;
+  btn.textContent = '▶ 继续 ' + fmtClock(rec.pos);
+  btn.title = '上次看到 ' + fmtClock(rec.pos) + '（' + (rec.name || basename(rec.path)) + '）\n' +
+    rec.path + '\n想从头看：在该文件的行尾菜单里选「↺ 从头播放」';
+  btn.disabled = !state.browse.albumId || state.browse.loading;
+}
+
+function playResume() {
+  var entry = resumeEntry();
+  var rec = state.resume;
+  if (!entry || !rec) return;
+  if (state.browse.albumId !== rec.albumId) {
+    /* 记录属于另一个专辑：先切过去再播 */
+    state.selectedAlbumId = rec.albumId;
+    saveUiPrefs();
+    loadBrowse(rec.albumId, (rec.path.replace(/\/[^/]*$/, '') || '/'));
+  }
+  playEntry(entry, 'replace');
+}
+
+function clearResume(silent) {
+  return apiClearResume().then(function () {
+    state.resume = null;
+    renderResume();
+    renderListing();
+    if (!silent) toast('info', '已清除续播记录');
+  }).catch(function (err) {
+    if (!silent) toast('error', '清除失败：' + err.message);
+  });
+}
+
 /* ---------- 播放 ---------- */
 
-function playEntry(entry, mode) {
+function playEntry(entry, mode, opts) {
   if (!state.browse.albumId) { toast('error', '没有选中的专辑'); return Promise.resolve(); }
+  var options = opts || {};
   return apiPlay({
     albumId: state.browse.albumId,
     path: entry.path,
     mode: mode,
-    loadSubs: true
+    loadSubs: true,
+    // 带上 size/mtime：服务端据此判断"上次那条进度"还算不算数（文件被换掉就不续播）
+    size: typeof entry.size === 'number' ? entry.size : undefined,
+    mtime: entry.mtime || undefined,
+    resume: options.resume === false ? false : undefined
   }).then(function (res) {
     if (res.player) applyPlayer(res.player);
     var subs = Array.isArray(res.subtitles) ? res.subtitles : [];
     state.subCache[entry.path] = subs;
     renderListing();
-    if (mode !== 'replace' && res.player) {
+    if (res.resumed) {
+      setStatus('已从上次位置继续播放：' + (res.resumedText || ''), 'ok');
+      toast('success', '继续上次播放：' + (res.resumedText || ''), 4000);
+    } else if (mode !== 'replace' && res.player) {
       setStatus('已追加到播放列表：' + (entry.name || ''), 'ok');
     } else {
       setStatus('正在播放：' + (entry.name || ''), 'ok');
@@ -956,7 +1052,11 @@ function scrollSelectionIntoView() {
 function openEntryMenu(entry, x, y) {
   var items = [];
   if (canPlay(entry)) {
+    var hasResume = isResumeFor(entry);
     items.push({ label: '▶ 播放（替换当前）', run: function () { playEntry(entry, 'replace'); } });
+    if (hasResume) {
+      items.push({ label: '↺ 从头播放', run: function () { playEntry(entry, 'replace', { resume: false }); } });
+    }
     items.push({ label: '＋ 追加到播放列表', run: function () { playEntry(entry, 'append'); } });
     items.push({ sep: true });
   }
@@ -1011,6 +1111,13 @@ function bindToolbar() {
   $('#btn-up').addEventListener('click', goUp);
   $('#btn-refresh').addEventListener('click', reloadBrowse);
   $('#btn-play-all').addEventListener('click', playAll);
+  var resumeBtn = $('#btn-resume');
+  if (resumeBtn) {
+    resumeBtn.addEventListener('click', function (ev) {
+      if (ev && ev.shiftKey) { clearResume(); return; }   /* Shift+点击 = 清除记录 */
+      playResume();
+    });
+  }
 
   var search = $('#search-input');
   search.addEventListener('input', function () {
@@ -1064,9 +1171,12 @@ function applyPlayer(ps) {
   if (!ps || typeof ps !== 'object') return;
   /* 兼容两种形状：裸 PlayerState，以及 {ok:true, player:PlayerState} 信封 */
   if (ps.running === undefined && ps.player && typeof ps.player === 'object') ps = ps.player;
+  var wasActive = isPlayerActive();
   state.player = ps;
   renderPlayer();
   renderPlaylist();
+  /* 播放结束/停止时，服务端刚把进度落盘 —— 拉一次「继续观看」让工具栏按钮更新 */
+  if (wasActive && !isPlayerActive()) refreshResume(true);
   if (ps.error) setStatus('播放器错误：' + ps.error, 'error');
 }
 
@@ -1533,6 +1643,7 @@ function refreshState() {
     state.app = data;
     state.albums = Array.isArray(data.albums) ? data.albums : [];
     state.settings = data.settings || state.settings;
+    state.resume = data.resume || null;
     state.bootError = null;
     $('#boot-error').classList.add('hidden');
     $('#app').classList.remove('hidden');
@@ -1544,6 +1655,7 @@ function refreshState() {
     renderAlbums();
     renderHeader();
     renderToolbar();
+    renderResume();
 
     if (state.selectedAlbumId && state.browse.albumId !== state.selectedAlbumId) {
       var album = albumById(state.selectedAlbumId);

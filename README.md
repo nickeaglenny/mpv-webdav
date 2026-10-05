@@ -113,6 +113,32 @@ pwsh -NoProfile -File .\tools\autostart.ps1 -Uninstall   # 取消
 目录操作：**双击文件夹进入**（也可以点行内 **进入** 按钮，或选中后按回车），单击只做选中；
 工具栏 **↑ 上级** 或点面包屑返回。
 
+### 续播：只记最近一次
+
+播到一半退出（关窗口、点停止、Ctrl+C 关服务都算），下次再点**同一个文件**会从上次位置继续：
+
+- 记录只写一份 `data/last-played.json`，**恒定一条、约 200 字节**，不会随观看数量增长；
+- 落盘时机：播放中每 30 秒、暂停、停止/播完、服务退出；
+- 双阈值：看了不到 5%（且不足 30 秒）视为没看、不记；距结尾不足 60 秒视为看完，**自动清除**；
+- 工具栏会出现 **▶ 继续 12:34** 按钮（**Shift+点击 = 清除记录**）；
+- 播放请求会带上文件大小/时间做校验：**文件换过版本就不续播**，从头开始；
+- 想从头看：该文件行尾 **⋯ → ↺ 从头播放**；
+- mpv 里按 **Shift+BACKSPACE** 可退回跳转前的位置。
+
+阈值可在「设置」里调（`resumeMinSeconds` / `resumeMinPercent` / `resumeEndGuardSeconds`）。
+
+### 和你直接用 mpv 打开文件：互不影响
+
+本应用启动的 mpv 实例固定带 `--no-save-position-on-quit` 和 `--no-resume-playback`：
+
+| 场景 | 结果 |
+| --- | --- |
+| 你在资源管理器双击视频（mpv 是默认播放器） | 读写的是 mpv 自己的 `%APPDATA%\mpv\watch_later\`，**与本应用无关**，本应用也不会去读 |
+| 本应用的续播 | 只读写 `data\last-played.json`，外部 mpv 看不到、也不会改 |
+| 两边同时开着 watch-later | 键天然不同：外部是本地路径 `C:\…` 的 MD5，本应用走的是 `http://127.0.0.1/…` 代理 URL，不会串 |
+
+也就是说：**应用内外的播放进度完全隔离，互不影响**。
+
 字幕规则（在「设置」里可改）：
 
 - 扫描**视频所在目录**里所有字幕扩展名文件（`srt/ass/ssa/sub/idx/sup/vtt/smi/mks/pgs...`），按文件名匹配：
@@ -193,6 +219,7 @@ mpv-webdav/
 | alang / slang | `zh,chi,zho,eng` | 音轨 / 字幕语言优先级 |
 | 附加 mpv 参数 | 空 | 每行一个 |
 | 默认音量 | 100 | 新开的 mpv 使用该音量 |
+| 续播阈值 | 30 秒 / 5% / 结尾 60 秒 | 低于前者不记（没看），进入后者算看完（清除） |
 
 ## 7. 测试与自检
 
@@ -224,6 +251,9 @@ node tools\probe-ipc.js
 
 :: 验证专辑配置的自动备份 / 误删恢复（只操作 tools\.storetest）
 node tools\store-test.js
+
+:: 续播逻辑单测（阈值判定、记录匹配、落盘/恢复，不需要 mpv）
+node tools\resume-test.js
 
 :: 字幕编码：单元测试 + 对着真实服务器查某个字幕文件的编码
 node tools\encoding-test.js
@@ -303,6 +333,7 @@ $p='start.bat'; [IO.File]::WriteAllText($p, ([IO.File]::ReadAllText($p) -replace
 | `data/albums.json` | 你建的所有专辑（**密码是明文**，因为服务要用它登录 WebDAV） |
 | `data/albums.json.bak` | 上一次保存前的自动备份 |
 | `data/settings.json`（+`.bak`） | 设置项 |
+| `data/last-played.json` | 最近一次的播放进度（只有一条，可随时删） |
 
 - 每次保存前，程序会先把现有文件另存为 `.bak`；
 - 启动时如果 `albums.json` **被删掉或写坏了**，会自动从 `.bak` 恢复并在控制台提示，恢复后重建主文件；
