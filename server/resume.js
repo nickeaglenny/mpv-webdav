@@ -55,8 +55,18 @@ function matches(record, { albumId, path, size, mtime }) {
   if (record.albumId !== albumId) return false;
   if (record.path !== path) return false;
   if (Number.isFinite(size) && record.size != null && size !== record.size) return false;
-  if (mtime && record.mtime && mtime !== record.mtime) return false;
+  // mtime 只作参考：不同 WebDAV 服务对时间格式/时区的表示可能不一致，
+  // 若把它当硬条件，就会出现"明明有记录却不续播"的怪现象。
   return true;
+}
+
+// 记录与本次请求的关系，用于日志/诊断
+function mismatchReason(record, { albumId, path, size }) {
+  if (!record) return 'no-record';
+  if (record.albumId !== albumId) return 'other-album';
+  if (record.path !== path) return 'other-file';
+  if (Number.isFinite(size) && record.size != null && size !== record.size) return 'size-changed';
+  return null;
 }
 
 function describe(record) {
@@ -71,4 +81,4 @@ function describe(record) {
   return `${record.name || record.path} · ${time}`;
 }
 
-module.exports = { DEFAULT_RULES, rules, decide, buildRecord, matches, describe };
+module.exports = { DEFAULT_RULES, rules, decide, buildRecord, matches, mismatchReason, describe };

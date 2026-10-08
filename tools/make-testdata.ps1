@@ -93,6 +93,14 @@ $gbk = [System.Text.Encoding]::GetEncoding(936)
 [System.IO.File]::WriteAllText((Join-Path $encDir '胶片.chs.ass'), $gbkAss, $gbk)
 Write-Host '已写入 GBK 编码测试字幕: 编码测试\胶片.chs.srt / 胶片.chs.ass'
 
+# ---- 剧集目录：一个目录里多个中文名视频（各 20 秒，便于验证中途停止时的续播记录）----
+$seriesDir = Join-Path $root '剧集'
+New-Item -ItemType Directory -Force -Path $seriesDir | Out-Null
+foreach ($i in 1..3) {
+    New-Video (Join-Path $seriesDir ('穹庐下的魔女 第{0:d2}集.mp4' -f $i)) 20 'testsrc2'
+}
+Write-Host '已准备剧集目录: 剧集\穹庐下的魔女 第01..03集.mp4（各 20 秒）'
+
 Write-Host ''
 Get-ChildItem -Recurse -File $root | ForEach-Object {
     '{0,10}  {1}' -f $_.Length, $_.FullName.Substring($root.Length + 1)

@@ -452,7 +452,7 @@ class MpvController extends EventEmitter {
 
   _applyPath(url) {
     if (!url) return;
-    const item = this.urlMap.get(url);
+    const item = this._findItemByUrl(url);
     if (item) {
       this.state.albumId = item.albumId;
       this.state.path = item.path;
@@ -461,15 +461,41 @@ class MpvController extends EventEmitter {
       this.state.subtitleCount = this.state.subtitles.length;
     } else {
       this.state.mediaTitle = url.split('/').pop() || url;
+      // 对应不回专辑文件时，续播记录会一直停在上一部片子上——把线索写进日志
+      this.emit('log', {
+        level: 'warn',
+        message: '无法把 mpv 当前播放地址对应回专辑文件（进度不会记录）：' + String(url).slice(0, 140),
+      });
     }
     this.emitState(true);
+  }
+
+  // mpv 回报的 path 有时与传入的 URL 在百分号编码上不一致（非 ASCII 文件名尤其常见），
+  // 所以先精确匹配，再按「解码后相同」匹配一遍。
+  _normalizeUrl(u) {
+    if (!u) return '';
+    let s = String(u);
+    try { s = decodeURIComponent(s); } catch { /* 保留原样 */ }
+    return s.replace(/\?.*$/, '');
+  }
+
+  _findItemByUrl(url) {
+    if (!url) return null;
+    const exact = this.urlMap.get(url);
+    if (exact) return exact;
+    const target = this._normalizeUrl(url);
+    if (!target) return null;
+    for (const [key, item] of this.urlMap) {
+      if (this._normalizeUrl(key) === target) return item;
+    }
+    return null;
   }
 
   _applyPlaylist(list) {
     if (!Array.isArray(list)) return;
     const items = list.map((entry, index) => {
       const url = entry && entry.filename ? String(entry.filename) : '';
-      const mapped = this.urlMap.get(url);
+      const mapped = this._findItemByUrl(url);
       return {
         index,
         title: (mapped && (mapped.title || mapped.name)) || (entry && entry.title) || (url ? url.split('/').pop() : ''),
@@ -520,6 +546,15 @@ class MpvController extends EventEmitter {
 
     if (mode === 'append') {
       this.queue.push(...list);
+      // 追加后立刻刷新界面上的播放列表（回退模式不会走 mpv 的 playlist 事件）
+      this.state.playlistPos = this.queuePos;
+      this.state.playlist = this.queue.map((it, i) => ({
+        index: i,
+        title: it.title || it.name,
+        path: it.path,
+        albumId: it.albumId,
+        playing: i === this.queuePos,
+      }));
     } else {
       this.queue = list.slice();
       this.queuePos = 0;
@@ -540,21 +575,27 @@ class MpvController extends EventEmitter {
       }
     } else {
       if (mode === 'append') {
+        // 回退模式：只入队，不要重启当前正在播的那个进程
         this.emit('log', { level: 'info', message: '已加入播放列表（回退模式：点击“下一首”逐条播放）' });
       } else {
         this.queuePos = 0;
+        this._playSpawnItem(this.queuePos);
       }
-      this._playSpawnItem(this.queuePos >= 0 ? this.queuePos : 0);
     }
 
-    this.state.subtitles = (first.subNames || []).slice();
-    this.state.subtitleCount = this.state.subtitles.length;
-    this.state.albumId = first.albumId;
-    this.state.path = first.path;
-    this.state.mediaTitle = first.title || first.name;
-    this.state.resumedFrom = Number.isFinite(first.start) && first.start > 0 ? first.start : 0;
-    this.state.running = true;
-    this.state.idle = false;
+    // 只有「替换播放」才改变"当前在播的是谁"。
+    // 追加到播放列表时绝不能把状态改成被追加的那一条——否则玩家状态（以及续播记录）
+    // 会指向最后一个追加项，而实际在播的还是原来那个（剧集目录最容易踩到）。
+    if (mode !== 'append') {
+      this.state.subtitles = (first.subNames || []).slice();
+      this.state.subtitleCount = this.state.subtitles.length;
+      this.state.albumId = first.albumId;
+      this.state.path = first.path;
+      this.state.mediaTitle = first.title || first.name;
+      this.state.resumedFrom = Number.isFinite(first.start) && first.start > 0 ? first.start : 0;
+      this.state.running = true;
+      this.state.idle = false;
+    }
     this.emitState(true);
     return this.getState();
   }

@@ -48,8 +48,12 @@ check('同一个文件（size/mtime 一致）→ 匹配',
   resume.matches(rec, { albumId: 'alb_x', path: '/影视/电影/01.mp4', size: 647468265, mtime: '2026-06-21T23:30:00Z' }) === true);
 check('文件被替换（size 不同）→ 不匹配',
   resume.matches(rec, { albumId: 'alb_x', path: '/影视/电影/01.mp4', size: 111 }) === false);
-check('mtime 变了 → 不匹配',
-  resume.matches(rec, { albumId: 'alb_x', path: '/影视/电影/01.mp4', mtime: '2027-01-01T00:00:00Z' }) === false);
+check('mtime 表示不同但 size 一致 → 仍然匹配（宽容，避免"有记录却不续播"）',
+  resume.matches(rec, { albumId: 'alb_x', path: '/影视/电影/01.mp4', size: 647468265, mtime: '2027-01-01T00:00:00Z' }) === true);
+check('mismatchReason 能说明不续播的原因',
+  resume.mismatchReason(rec, { albumId: 'alb_x', path: '/影视/电影/02.mp4', size: 647468265 }) === 'other-file'
+  && resume.mismatchReason(rec, { albumId: 'alb_x', path: '/影视/电影/01.mp4', size: 5 }) === 'size-changed'
+  && resume.mismatchReason(null, { albumId: 'alb_x', path: '/影视/电影/01.mp4' }) === 'no-record');
 check('另一个专辑的同名路径 → 不匹配',
   resume.matches(rec, { albumId: 'alb_y', path: '/影视/电影/01.mp4' }) === false);
 check('前端没带 size/mtime 时只比对专辑+路径 → 匹配',

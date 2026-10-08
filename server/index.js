@@ -334,18 +334,24 @@ async function handlePlay(body) {
     }
   }
 
-  // 「只记最近一次」续播：只有在看的就是上次那个文件、且大小/时间没变时才跳转。
+  // 「只记最近一次」续播：只有在看的就是上次那个文件、且大小没变时才跳转。
   // body.size / body.mtime 由前端从目录列表带过来，避免额外一次 PROPFIND。
   const stored = store.getResume();
   const size = Number.isFinite(body.size) ? body.size : null;
   const mtime = body.mtime || null;
   let startAt = null;
-  if (resume.matches(stored, { albumId: album.id, path: rel, size, mtime })) {
+  if (resume.matches(stored, { albumId: album.id, path: rel, size })) {
     if (body.resume === false) {
       store.clearResume();          // 「从头播放」：顺手把旧进度清掉
     } else {
       startAt = stored.pos;
     }
+  } else if (stored) {
+    // 有记录但用不上：把原因写进日志，方便排查「为什么不续播」
+    mpv.emit('log', {
+      level: 'info',
+      message: `上次进度不适用于本次播放（${resume.mismatchReason(stored, { albumId: album.id, path: rel, size })}）：${stored.name || stored.path}`,
+    });
   }
 
   const item = {

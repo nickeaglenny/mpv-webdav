@@ -947,7 +947,9 @@ function playAll() {
         albumId: state.browse.albumId,
         path: entry.path,
         mode: first ? 'replace' : 'append',
-        loadSubs: true
+        loadSubs: true,
+        size: typeof entry.size === 'number' ? entry.size : undefined,
+        mtime: entry.mtime || undefined
       }).then(function (res) {
         first = false;
         if (res.player) applyPlayer(res.player);

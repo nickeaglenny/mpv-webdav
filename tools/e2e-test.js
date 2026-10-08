@@ -438,6 +438,87 @@ function readLog(file) {
       check('DELETE /api/resume 可用', r.status === 200 && !!(r.json && r.json.ok));
     }
 
+    // --- 剧集目录（一个目录多个视频）：续播记录必须指向"真正在播的那一集"
+    r = await api('GET', `/api/browse?albumId=${album.id}&path=${encodeURIComponent('/剧集')}`);
+    const epEntries = (r.json && r.json.entries) || [];
+    const ep1 = epEntries.find((e) => e.name === '穹庐下的魔女 第01集.mp4');
+    const ep2 = epEntries.find((e) => e.name === '穹庐下的魔女 第02集.mp4');
+    const ep3 = epEntries.find((e) => e.name === '穹庐下的魔女 第03集.mp4');
+    check('剧集目录：识别到 3 集', !!ep1 && !!ep2 && !!ep3, epEntries.map((e) => e.name).join(' / '));
+
+    // 「追加到播放列表」绝不能改变"当前正在播的是谁"——这条与传输方式无关，
+    // 回退模式同样会踩到（旧代码会把状态改成最后追加的那一集，导致续播记录串集）。
+    if (ep1 && ep2 && ep3) {
+      const playEp = (ep, mode) => api('POST', '/api/play', {
+        albumId: album.id, path: ep.path, mode, loadSubs: false, size: ep.size, mtime: ep.mtime,
+      });
+      await playEp(ep1, 'replace');
+      await sleep(700);
+      await playEp(ep2, 'append');
+      await playEp(ep3, 'append');
+      await sleep(700);
+      const stAppend = (await api('GET', '/api/player')).json.player;
+      check('追加剧集不会改掉「正在播的那一集」', stAppend.path === ep1.path, `path=${stAppend.path}`);
+      check('追加后播放列表共 3 项', (stAppend.playlist || []).length === 3,
+        (stAppend.playlist || []).map((x) => x.title).join(' | '));
+      await api('POST', '/api/player', { action: 'stop' });
+      await sleep(400);
+    }
+
+    if (playing && playing.mode === 'ipc' && ep1 && ep2 && ep3) {
+      const playEpisode = (ep, mode) => api('POST', '/api/play', {
+        albumId: album.id, path: ep.path, mode, loadSubs: true, size: ep.size, mtime: ep.mtime,
+      });
+      const getResume = async () => (await api('GET', '/api/resume')).json.resume;
+      const playerPath = async () => (await api('GET', '/api/player')).json.player.path;
+
+      // 1) 只看某一集：播第 2 集 → 暂停（暂停会立刻落盘）→ 记录必须是第 2 集
+      await playEpisode(ep2, 'replace');
+      await sleep(2500);
+      await api('POST', '/api/player', { action: 'pause' });
+      await sleep(600);
+      let recEp = await getResume();
+      check('单集播放：记录指向第 02 集', !!recEp && recEp.path === ep2.path,
+        recEp ? `${recEp.path} pos=${recEp.pos}` : '没有记录');
+      check('单集播放：记录里带 size 且与第 02 集一致',
+        !!recEp && recEp.size === ep2.size, recEp ? `${recEp.size} vs ${ep2.size}` : '');
+      check('单集播放：播放状态也指向第 02 集', (await playerPath()) === ep2.path, await playerPath());
+
+      // 2) 连播：replace 第 1 集 + append 第 2/3 集 → 状态必须仍指向第 1 集
+      await playEpisode(ep1, 'replace');
+      await sleep(1200);
+      await playEpisode(ep2, 'append');
+      await playEpisode(ep3, 'append');
+      await sleep(1200);
+      const pathAfterAppend = await playerPath();
+      check('追加剧集后，播放状态仍指向正在播的第 01 集', pathAfterAppend === ep1.path, `path=${pathAfterAppend}`);
+      const pl = (await api('GET', '/api/player')).json.player.playlist || [];
+      check('播放列表共 3 项', pl.length === 3, pl.map((x) => x.title).join(' | '));
+
+      // 暂停让它落盘：记录必须写在第 01 集上（而不是被追加的第 3 集）
+      await api('POST', '/api/player', { action: 'pause' });
+      await sleep(800);
+      recEp = await getResume();
+      check('连播时记录写在第 01 集上（不会串到追加项）', !!recEp && recEp.path === ep1.path,
+        recEp ? `${recEp.path} pos=${recEp.pos}` : '没有记录');
+
+      // 3) 点「继续观看」= 播这条记录：应当带上续播位置
+      r = await api('POST', '/api/play', {
+        albumId: album.id, path: recEp.path, mode: 'replace', loadSubs: true,
+        size: recEp.size, mtime: recEp.mtime,
+      });
+      check('剧集续播：请求带上了上次位置', !!(r.json && r.json.resumed > 0),
+        `resumed=${r.json && r.json.resumed} text=${r.json && r.json.resumedText}`);
+      await sleep(1200);
+      const posEp = (await api('GET', '/api/player')).json.player.position;
+      check('剧集续播：mpv 实际跳到了上次位置', posEp >= recEp.pos - 1.5,
+        `position=${posEp} 期望≈${recEp.pos}`);
+      await api('POST', '/api/player', { action: 'stop' });
+      await api('DELETE', '/api/resume');
+    } else if (ep1) {
+      console.log('SKIP  剧集续播（回退模式无法采集位置）');
+    }
+
     // --- 置顶 / 自动全屏 开关（默认：置顶开、全屏关）
     r = await api('PUT', '/api/settings', { mpvOntop: false, mpvAutoFullscreen: true });
     check('设置里能关掉置顶、打开自动全屏',
