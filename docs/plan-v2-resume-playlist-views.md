@@ -13,7 +13,28 @@
 | 剧集分组 | **整目录 + 自然排序** |
 | 实施节奏 | **先做阶段 0+1**，验收后再做阶段 2/3/4 |
 
-**进度**：阶段 0（data/ 三分区 + 旧文件迁移）与阶段 1（固定流地址令牌）**已实施**；阶段 2/3/4 待验收后开工。
+**进度**：阶段 0（data/ 三分区 + 旧文件迁移）、阶段 1（固定流地址令牌）、**阶段 2（进度改由 mpv 的 watch-later 记录）均已实施**；阶段 3/4 待开工。
+
+### 阶段 2 实施记录（2026-10-09）
+
+实测结论（决定了实现细节）：
+
+| 实验 | 结果 |
+| --- | --- |
+| http 流地址能否记录+续播 | 能：条目名 = `MD5(URL)`，再次播放自动从上次位置开始 ✅ |
+| 切换文件（`loadfile replace`）时，上一个文件 | **不会**自动保存 → 我们必须在切集前主动发一次 `write-watch-later-config` |
+| `--resume-playback-check-mtime` | http 地址没有 mtime，用不上（同路径换文件的场景需手动「从头播放」） |
+| 停止 / 关窗口 / 退出 | mpv 自动保存 ✅ |
+| 播到结尾 | 不保存（=看完）✅ |
+| 同文件重载 + 「从头播放」 | mpv 会先把旧位置写回条目 → 除了删条目，还要显式传 `start=0`（实测能压过 watch-later） |
+
+落地内容：
+
+- 新增 `server/watchlater.js`：md5 键、读/写/删、扫描、LRU 清理（条数 + 天数）、URL ↔ 专辑/文件解析、旧进度迁移
+- `server/mpv.js`：`--watch-later-directory=<data>/cache/watch-later`、`--watch-later-options=start`、`--save-position-on-quit=yes`；新增 `savePosition()`，在**切集前 / 停止时 / 退出时**主动保存
+- `server/index.js`：删掉自管进度状态机（节流写盘、阈值判定、记录匹配）与 `server/resume.js`；`/api/resume` 改为读 mpv 条目；启动时迁移旧快照 + 清理一次，之后每天一次；`DELETE /api/resume` 只清最近一条
+- 前端：设置里新增进度条数/天数上限与「立即清理一次」；「继续观看」按钮改为读 mpv 的条目
+- 测试：`resume-test` 重写为 watchlater 单测（31 项）、`state-test` 26 项、e2e 98 项（IPC）、ui-test 45 项
 
 ---
 

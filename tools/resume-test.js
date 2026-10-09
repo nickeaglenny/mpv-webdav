@@ -1,11 +1,10 @@
 'use strict';
-// 「只记最近一次」播放进度的离线单元测试（不需要 mpv / 浏览器 / 网络）。
+// 播放进度（mpv 的 watch-later）离线测试：不需要 mpv / 浏览器 / 网络。
 // 用法：node tools/resume-test.js
 
 const fs = require('fs');
 const path = require('path');
-const resume = require('../server/resume');
-const { Store } = require('../server/store');
+const wl = require('../server/watchlater');
 
 const WORK = path.join(__dirname, '.resumetest');
 const results = [];
@@ -15,89 +14,108 @@ function check(name, ok, detail = '') {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? '  — ' + detail : ''}`);
   if (!ok) failed++;
 }
+function reset() {
+  fs.rmSync(WORK, { recursive: true, force: true });
+  fs.mkdirSync(WORK, { recursive: true });
+}
 
-// ---------- 阈值判定 ----------
-const rules = { resumeMinSeconds: 30, resumeMinPercent: 5, resumeEndGuardSeconds: 60 };
+const TOKEN = 'a1b2c3d4e5f60718293a4b5c6d7e8f90';
+const URL1 = `http://127.0.0.1:8787/stream/${TOKEN}/alb_x/%E5%89%A7%E9%9B%86/%E7%AC%AC01%E9%9B%86.mp4`;
+const URL2 = `http://127.0.0.1:8787/stream/${TOKEN}/alb_x/%E5%89%A7%E9%9B%86/%E7%AC%AC02%E9%9B%86.mp4`;
 
-check('刚开播（10 秒 / 2700 秒）→ 不记',
-  resume.decide(10, 2700, rules) === 'clear', resume.decide(10, 2700, rules));
-check('看到 20%（540 秒）→ 记',
-  resume.decide(540, 2700, rules) === 'remember', resume.decide(540, 2700, rules));
-check('短视频只看 40 秒但已达 5%（800 秒的 5% = 40）→ 记',
-  resume.decide(45, 800, rules) === 'remember', resume.decide(45, 800, rules));
-check('距结尾不足 60 秒（2650 / 2700）→ 视为看完，清掉',
-  resume.decide(2650, 2700, rules) === 'clear', resume.decide(2650, 2700, rules));
-check('恰好停在结尾保护线之前（2600 / 2700）→ 记',
-  resume.decide(2600, 2700, rules) === 'remember', resume.decide(2600, 2700, rules));
-check('时长未知 → 不动',
-  resume.decide(500, 0, rules) === 'skip', resume.decide(500, 0, rules));
-check('位置为 0 → 不动',
-  resume.decide(0, 2700, rules) === 'skip', resume.decide(0, 2700, rules));
-check('可配置阈值生效（minSeconds=600）',
-  resume.decide(300, 2700, { resumeMinSeconds: 600, resumeMinPercent: 5, resumeEndGuardSeconds: 60 }) === 'clear');
+// ---------- mpv 的键规则（文件名 = MD5(URL) 大写十六进制） ----------
+check('keyFor 是 32 位大写十六进制', /^[0-9A-F]{32}$/.test(wl.keyFor(URL1)), wl.keyFor(URL1));
+check('keyFor 与标准 MD5 一致（"hello" 的已知值）',
+  wl.keyFor('hello') === '5D41402ABC4B2A76B9719D911017C592', wl.keyFor('hello'));
+check('中文/百分号编码的地址也能稳定得到同一个键', wl.keyFor(URL1) === wl.keyFor(URL1));
 
-// ---------- 记录构造 / 匹配 ----------
-const rec = resume.buildRecord({
-  albumId: 'alb_x', path: '/影视/电影/01.mp4', name: '01.mp4',
-  pos: 754.26, dur: 2700.4, size: 647468265, mtime: '2026-06-21T23:30:00Z',
-}, 1780000000000);
-check('buildRecord 保留关键字段', rec.albumId === 'alb_x' && rec.pos === 754.3 && rec.dur === 2700.4, JSON.stringify(rec));
-check('describe 输出「文件名 · 时间」', resume.describe(rec) === '01.mp4 · 12:34', resume.describe(rec));
+// ---------- 读 / 写 / 删 ----------
+reset();
+check('没有条目时读出 null', wl.readEntry(WORK, URL1) === null);
+wl.writeEntry(WORK, URL1, 733.5);
+const e1 = wl.readEntry(WORK, URL1);
+check('写入后能读出位置', !!e1 && Math.abs(e1.pos - 733.5) < 0.001, e1 ? String(e1.pos) : 'null');
+check('文件名就是 MD5 键', fs.existsSync(path.join(WORK, wl.keyFor(URL1))));
+check('条目内容含路径注释与 start=', (() => {
+  const t = fs.readFileSync(path.join(WORK, wl.keyFor(URL1)), 'utf8');
+  return t.includes('# ' + URL1) && /start=733\.5/.test(t);
+})());
+wl.removeEntry(WORK, URL1);
+check('删除后读出 null', wl.readEntry(WORK, URL1) === null);
 
-check('同一个文件（size/mtime 一致）→ 匹配',
-  resume.matches(rec, { albumId: 'alb_x', path: '/影视/电影/01.mp4', size: 647468265, mtime: '2026-06-21T23:30:00Z' }) === true);
-check('文件被替换（size 不同）→ 不匹配',
-  resume.matches(rec, { albumId: 'alb_x', path: '/影视/电影/01.mp4', size: 111 }) === false);
-check('mtime 表示不同但 size 一致 → 仍然匹配（宽容，避免"有记录却不续播"）',
-  resume.matches(rec, { albumId: 'alb_x', path: '/影视/电影/01.mp4', size: 647468265, mtime: '2027-01-01T00:00:00Z' }) === true);
-check('mismatchReason 能说明不续播的原因',
-  resume.mismatchReason(rec, { albumId: 'alb_x', path: '/影视/电影/02.mp4', size: 647468265 }) === 'other-file'
-  && resume.mismatchReason(rec, { albumId: 'alb_x', path: '/影视/电影/01.mp4', size: 5 }) === 'size-changed'
-  && resume.mismatchReason(null, { albumId: 'alb_x', path: '/影视/电影/01.mp4' }) === 'no-record');
-check('另一个专辑的同名路径 → 不匹配',
-  resume.matches(rec, { albumId: 'alb_y', path: '/影视/电影/01.mp4' }) === false);
-check('前端没带 size/mtime 时只比对专辑+路径 → 匹配',
-  resume.matches(rec, { albumId: 'alb_x', path: '/影视/电影/01.mp4' }) === true);
+// 解析：目录条目（redirect entry）要忽略，start=0 视为没有进度
+check('忽略 redirect 条目', wl.parseEntryText('# redirect entry\n') === null);
+check('start=0 视为没有进度', wl.parseEntryText('# x\nstart=0.000000\n') === null);
+check('损坏内容返回 null', wl.parseEntryText('乱七八糟') === null);
 
-// ---------- Store 落盘 / 恢复 / 清除（复用原子写 + 备份） ----------
+// ---------- 扫描：按更新时间倒序，且只看有进度的 ----------
+reset();
+wl.writeEntry(WORK, URL1, 10);
+wl.writeEntry(WORK, URL2, 20);
+fs.writeFileSync(path.join(WORK, 'DEADBEEFDEADBEEFDEADBEEFDEADBEEF'), '# redirect entry\n', 'utf8');
+const now = Date.now();
+fs.utimesSync(path.join(WORK, wl.keyFor(URL1)), new Date(now - 5000), new Date(now - 5000));
+fs.utimesSync(path.join(WORK, wl.keyFor(URL2)), new Date(now - 1000), new Date(now - 1000));
+const scanned = wl.scan(WORK);
+check('扫描只返回有进度的条目', scanned.length === 2, String(scanned.length));
+check('扫描按最近更新排在最前', scanned[0] && scanned[0].target === URL2, scanned[0] && scanned[0].target);
+check('扫描结果带位置与时间', !!scanned[0] && scanned[0].pos === 20 && scanned[0].updatedAt > 0);
+
+// ---------- 清理：条数上限 + 天数上限 ----------
+reset();
+for (let i = 1; i <= 5; i++) {
+  const u = URL1.replace('%E7%AC%AC01%E9%9B%86', 'EP' + i);
+  wl.writeEntry(WORK, u, i * 10);
+  const t = new Date(now - (6 - i) * 24 * 3600 * 1000);   // i 越大越新
+  fs.utimesSync(path.join(WORK, wl.keyFor(u)), t, t);
+}
+let pruned = wl.prune(WORK, { maxEntries: 3, maxAgeDays: 90 });
+check('按条数上限清理（5 条 → 留 3 条）', wl.scan(WORK).length === 3, `removed=${pruned.removed}`);
+check('留下的是最新那几条', (() => {
+  const kept = wl.scan(WORK).map((e) => e.pos).sort((a, b) => a - b);
+  return kept.join(',') === '30,40,50';
+})(), wl.scan(WORK).map((e) => e.pos).join(','));
+check('最新的一条没被删', !!wl.readEntry(WORK, URL1.replace('%E7%AC%AC01%E9%9B%86', 'EP5')));
+
+reset();
+wl.writeEntry(WORK, URL1, 100);
+wl.writeEntry(WORK, URL2, 200);
+const old = new Date(now - 200 * 24 * 3600 * 1000);
+fs.utimesSync(path.join(WORK, wl.keyFor(URL1)), old, old);
+pruned = wl.prune(WORK, { maxEntries: 100, maxAgeDays: 90 });
+check('按天数上限清理（200 天前的删掉）', !wl.readEntry(WORK, URL1) && !!wl.readEntry(WORK, URL2), `removed=${pruned.removed}`);
+check('maxAgeDays=0 表示不按天数清', (() => {
+  const r = wl.prune(WORK, { maxEntries: 100, maxAgeDays: 0 });
+  return r.removed === 0;
+})());
+check('空目录清理不报错', wl.prune(path.join(WORK, '不存在'), { maxEntries: 5, maxAgeDays: 5 }).removed === 0);
+
+// ---------- 流地址 → 专辑/文件 ----------
+const parsed = wl.parseStreamUrl(URL1, TOKEN);
+check('能从流地址解析出专辑与文件', !!parsed && parsed.albumId === 'alb_x' && parsed.path === '/剧集/第01集.mp4',
+  parsed ? `${parsed.albumId} ${parsed.path}` : 'null');
+check('token 不匹配时不认（换过 token 的旧进度会自然失效）', wl.parseStreamUrl(URL1, 'ffff') === null);
+check('非本应用的地址返回 null', wl.parseStreamUrl('https://example.com/foo.mp4', TOKEN) === null);
+check('本地路径返回 null', wl.parseStreamUrl('G:\\movies\\a.mkv', TOKEN) === null);
+
+// ---------- 旧快照 → mpv 条目（迁移） ----------
+reset();
+const migrated = wl.migrateLegacyRecord(WORK, URL1, 480.25);
+check('旧进度能迁移成 mpv 条目', !!migrated && !migrated.skipped && !!wl.readEntry(WORK, URL1));
+check('迁移后的位置正确', Math.abs((wl.readEntry(WORK, URL1) || {}).pos - 480.25) < 0.01);
+check('已有 mpv 记录时不覆盖', (() => {
+  const again = wl.migrateLegacyRecord(WORK, URL1, 999);
+  return again && again.skipped === true && Math.abs(wl.readEntry(WORK, URL1).pos - 480.25) < 0.01;
+})());
+check('没有位置可迁移时返回 null', wl.migrateLegacyRecord(WORK, URL2, 0) === null);
+
+// ---------- 显示 ----------
+check('formatClock 短时长', wl.formatClock(754) === '12:34', wl.formatClock(754));
+check('formatClock 超过一小时', wl.formatClock(3725) === '1:02:05', wl.formatClock(3725));
+check('describe 输出「文件名 · 时间」', wl.describe({ pos: 754, target: URL1 }, '第01集.mp4') === '第01集.mp4 · 12:34',
+  wl.describe({ pos: 754, target: URL1 }, '第01集.mp4'));
+
 fs.rmSync(WORK, { recursive: true, force: true });
-fs.mkdirSync(WORK, { recursive: true });
-
-const s1 = new Store(WORK, 'mpv.exe');
-check('初始没有续播记录', s1.getResume() === null);
-s1.setResume(rec);
-check('写入后生成 state/recent.json', fs.existsSync(path.join(WORK, 'state', 'recent.json')));
-const size1 = fs.statSync(path.join(WORK, 'state', 'recent.json')).size;
-check('记录体积很小（< 400 字节）', size1 < 400, size1 + ' 字节');
-
-const s2 = new Store(WORK, 'mpv.exe');
-check('重启后能读回记录', !!s2.getResume() && s2.getResume().pos === 754.3 && s2.getResume().path === '/影视/电影/01.mp4');
-
-// 覆盖写入应产生备份（复用 store 的写前备份机制）
-const rec2 = Object.assign({}, rec, { pos: 800, updatedAt: 1780000001000 });
-s2.setResume(rec2);
-check('覆盖写入产生 .bak', fs.existsSync(path.join(WORK, 'state', 'recent.json.bak')));
-check('文件恒定只有一处记录（不随观看次数增长）',
-  (() => { const j = JSON.parse(fs.readFileSync(path.join(WORK, 'state', 'recent.json'), 'utf8')); return !Array.isArray(j) && j.pos === 800; })());
-
-s2.clearResume();
-check('清除后记录为 null', s2.getResume() === null);
-const s3 = new Store(WORK, 'mpv.exe');
-check('重启后依然是 null（清除已落盘）', s3.getResume() === null);
-
-// 损坏 / 缺失时：当作"没有进度"，绝不从 .bak 里复活一个已经失效的位置
-fs.writeFileSync(path.join(WORK, 'state', 'recent.json'), '{ 坏掉的 JSON', 'utf8');
-const s4 = new Store(WORK, 'mpv.exe');
-check('记录文件损坏时按"没有进度"处理（不复活旧备份）', s4.getResume() === null,
-  JSON.stringify(s4.getResume()));
-
-fs.rmSync(path.join(WORK, 'state', 'recent.json'), { force: true });
-const s5 = new Store(WORK, 'mpv.exe');
-check('记录文件被删掉时也是"没有进度"（即使 .bak 还在）', s5.getResume() === null,
-  JSON.stringify(s5.getResume()));
-
-fs.rmSync(WORK, { recursive: true, force: true });
-
 console.log('');
 console.log(`结果: ${results.filter((r) => r.ok).length}/${results.length} 通过`);
 for (const r of results.filter((x) => !x.ok)) console.log('  失败: ' + r.name + (r.detail ? ' :: ' + r.detail : ''));

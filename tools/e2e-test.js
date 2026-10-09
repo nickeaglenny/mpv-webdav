@@ -10,6 +10,7 @@
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const net = require('net');
 
 const ROOT = path.join(__dirname, '..');
@@ -359,10 +360,8 @@ function readLog(file) {
     check('mpv 通过代理发起了 Range 请求', /Range=bytes=/.test(mockText));
 
     // --- 与「外部直接用 mpv 打开文件」的隔离保证
-    check('我们的 mpv 实例关闭了 save-position-on-quit（不写用户全局 watch_later）',
-      /--no-save-position-on-quit/.test(mpvLog));
-    check('我们的 mpv 实例关闭了 resume-playback（续播由本应用自己管）',
-      /--no-resume-playback/.test(mpvLog));
+    // 现在的做法是**重定向**（进度写到我们自己的 cache/watch-later），而不是禁用；
+    // 具体断言在下面的 watch-later 段里（不放行 --no-* 参数、目录指向 data/cache/）。
 
     // --- 播放时的窗口行为（置顶默认开、自动全屏默认关）
     check('mpv 启动参数带上了置顶/全屏设置',
@@ -379,61 +378,64 @@ function readLog(file) {
       check('回退模式按设置传入置顶参数', /--ontop=yes/.test(mpvLog), '--ontop=yes');
     }
 
-    // --- 「只记最近一次」续播
+    // --- 进度由 mpv 记账（watch-later）
+    const wlDir = path.join(dataDir, 'cache', 'watch-later');
+    const wlEntries = () => {
+      try {
+        return fs.readdirSync(wlDir)
+          .map((f) => ({ file: path.join(wlDir, f), text: fs.readFileSync(path.join(wlDir, f), 'utf8') }))
+          .filter((e) => /^start=/m.test(e.text));
+      } catch { return []; }
+    };
+    const wlKeyFor = (url) => crypto.createHash('md5').update(url, 'utf8').digest('hex').toUpperCase();
+
+    check('进度目录在 data/cache/watch-later/',
+      fs.existsSync(wlDir), wlDir);
+    check('mpv 启动参数把进度重定向到我们的目录（而不是禁用）',
+      /--watch-later-directory=/.test(mpvLog) && /--save-position-on-quit=yes/.test(mpvLog)
+      && !/--no-save-position-on-quit/.test(mpvLog) && !/--no-resume-playback/.test(mpvLog),
+      (mpvLog.match(/--watch-later-[a-z-]+=\S+|--save-position-on-quit=\S+|--no-(?:save-position|resume-playback)[a-z-]*/g) || []).join(' '));
+
     r = await api('GET', '/api/resume');
     check('GET /api/resume 可用', r.status === 200 && !!(r.json && r.json.ok), JSON.stringify(r.json && r.json.resume));
 
     if (playing && playing.mode === 'ipc') {
-      // 换回测试影片，等它播到 --length=6 结束（结束时会强制落盘一次进度）
-      await api('POST', '/api/play', {
-        albumId: album.id, path: '/电影/测试影片.mkv', mode: 'replace', loadSubs: true,
-        size: video.size, mtime: video.mtime,
-      });
-      let rec = null;
-      for (let i = 0; i < 30; i++) {           // 最多等 ~15 秒
-        await sleep(500);
-        const rr = await api('GET', '/api/resume');
-        rec = rr.json && rr.json.resume;
-        if (rec && rec.path === '/电影/测试影片.mkv' && rec.pos > 0) break;
-        rec = null;
-      }
-      check('IPC 模式下自动记录了进度（只记一条）', !!rec,
-        rec ? `pos=${rec.pos} dur=${rec.dur} name=${rec.name}` : '没等到记录');
-      if (rec) {
-        check('记录里带 size（用于被动校验，避免文件换了还续播）',
-          rec.size === video.size, `size=${rec.size} 期望=${video.size}`);
-        check('记录里的路径正确', rec.path === '/电影/测试影片.mkv', rec.path);
+      const movieUrl = `http://127.0.0.1:${APP_PORT}/stream/${state0.streamToken}/${album.id}${encodeURI('/电影/测试影片.mkv')}`;
+      const movieKey = wlKeyFor(movieUrl);
 
-        // 再次播放同一文件：应当带上续播位置
-        r = await api('POST', '/api/play', {
-          albumId: album.id, path: '/电影/测试影片.mkv', mode: 'replace', loadSubs: true,
-          size: video.size, mtime: video.mtime,
-        });
-        check('再次播放同一文件时请求带上了续播位置', !!(r.json && r.json.resumed > 0),
-          `resumed=${r.json && r.json.resumed} text=${r.json && r.json.resumedText}`);
-        await sleep(1500);
-        const posRes = await api('GET', '/api/player');
-        const pos = posRes.json.player.position;
-        check('mpv 实际跳到了上次的位置', pos >= rec.pos - 1.5, `position=${pos} 期望≈${rec.pos}`);
+      // 1) 播 4 秒 → 停止：mpv 应当把进度写进 watch-later
+      await api('POST', '/api/play', { albumId: album.id, path: '/电影/测试影片.mkv', mode: 'replace', loadSubs: true });
+      await sleep(4000);
+      await api('POST', '/api/player', { action: 'stop' });
+      await sleep(1200);
+      check('停止后 mpv 写入了进度条目（文件名为 URL 的 MD5）',
+        fs.existsSync(path.join(wlDir, movieKey)), wlEntries().length + ' 条');
+      const rec = (await api('GET', '/api/resume')).json.resume;
+      check('接口报告的最近进度就是这部片', !!rec && rec.path === '/电影/测试影片.mkv' && rec.pos > 1,
+        rec ? `${rec.path} @ ${rec.pos}` : JSON.stringify(rec));
 
-        // 文件大小变了 → 视为另一个版本，不续播
-        r = await api('POST', '/api/play', {
-          albumId: album.id, path: '/电影/测试影片.mkv', mode: 'replace', loadSubs: true,
-          size: video.size + 1,
-        });
-        check('文件大小变了就不续播（被动失效）', !r.json.resumed, `resumed=${r.json.resumed}`);
+      // 2) 再播同一地址：mpv 应当自动续播，接口也要如实报告
+      r = await api('POST', '/api/play', { albumId: album.id, path: '/电影/测试影片.mkv', mode: 'replace', loadSubs: true });
+      check('再次播放时接口报告了"将续播"', !!(r.json && r.json.resumed > 0),
+        `resumed=${r.json && r.json.resumed} text=${r.json && r.json.resumedText}`);
+      await sleep(1500);
+      const pos = (await api('GET', '/api/player')).json.player.position;
+      check('mpv 真的从上次位置继续（原生续播生效）', rec && pos >= rec.pos - 1.5,
+        `position=${pos} 期望≈${rec && rec.pos}`);
 
-        // 「从头播放」应清掉记录
-        r = await api('POST', '/api/play', {
-          albumId: album.id, path: '/电影/测试影片.mkv', mode: 'replace', loadSubs: true,
-          size: video.size, mtime: video.mtime, resume: false,
-        });
-        check('「从头播放」不续播且清掉记录', !r.json.resumed, `resumed=${r.json.resumed}`);
-        r = await api('GET', '/api/resume');
-        check('记录已被清除', !(r.json && r.json.resume), JSON.stringify(r.json && r.json.resume));
-      }
+      // 3) 「从头播放」应删掉该条进度并从 0 开始
+      r = await api('POST', '/api/play', { albumId: album.id, path: '/电影/测试影片.mkv', mode: 'replace', loadSubs: true, resume: false });
+      check('「从头播放」时接口不报续播', !r.json.resumed, `resumed=${r.json.resumed}`);
+      check('「从头播放」确实从头开始（显式 start=0 压过 watch-later）',
+        (await api('GET', '/api/player')).json.player.resumedFrom === 0);
+      await sleep(1500);   // 等服务端在加载完成后再清一次（mpv 同文件重载会把旧位置写回去）
+      check('「从头播放」会删掉那条进度', !fs.existsSync(path.join(wlDir, movieKey)));
+      const pos0 = (await api('GET', '/api/player')).json.player.position;
+      check('「从头播放」的位置从头累加', rec && pos0 < rec.pos, `position=${pos0} 上次=${rec && rec.pos}`);
+      await api('POST', '/api/player', { action: 'stop' });
+      await sleep(600);
     } else {
-      console.log('SKIP  IPC 续播记录（当前是回退模式，无法采集播放位置；恢复路径由单测覆盖）');
+      console.log('SKIP  mpv 原生续播（当前是回退模式，命名管道不可用）');
       r = await api('DELETE', '/api/resume');
       check('DELETE /api/resume 可用', r.status === 200 && !!(r.json && r.json.ok));
     }
@@ -467,21 +469,19 @@ function readLog(file) {
 
     if (playing && playing.mode === 'ipc' && ep1 && ep2 && ep3) {
       const playEpisode = (ep, mode) => api('POST', '/api/play', {
-        albumId: album.id, path: ep.path, mode, loadSubs: true, size: ep.size, mtime: ep.mtime,
+        albumId: album.id, path: ep.path, mode, loadSubs: true,
       });
       const getResume = async () => (await api('GET', '/api/resume')).json.resume;
       const playerPath = async () => (await api('GET', '/api/player')).json.player.path;
+      const stopPlaying = async () => { await api('POST', '/api/player', { action: 'stop' }); await sleep(1000); };
 
-      // 1) 只看某一集：播第 2 集 → 暂停（暂停会立刻落盘）→ 记录必须是第 2 集
+      // 1) 只看某一集：播第 2 集 → 停止（mpv 会存盘）→ 最近的进度必须是第 2 集
       await playEpisode(ep2, 'replace');
       await sleep(2500);
-      await api('POST', '/api/player', { action: 'pause' });
-      await sleep(600);
+      await stopPlaying();
       let recEp = await getResume();
-      check('单集播放：记录指向第 02 集', !!recEp && recEp.path === ep2.path,
-        recEp ? `${recEp.path} pos=${recEp.pos}` : '没有记录');
-      check('单集播放：记录里带 size 且与第 02 集一致',
-        !!recEp && recEp.size === ep2.size, recEp ? `${recEp.size} vs ${ep2.size}` : '');
+      check('单集播放：最近的进度指向第 02 集', !!recEp && recEp.path === ep2.path,
+        recEp ? `${recEp.path} pos=${recEp.pos}` : '没有进度');
       check('单集播放：播放状态也指向第 02 集', (await playerPath()) === ep2.path, await playerPath());
 
       // 2) 连播：replace 第 1 集 + append 第 2/3 集 → 状态必须仍指向第 1 集
@@ -495,26 +495,33 @@ function readLog(file) {
       const pl = (await api('GET', '/api/player')).json.player.playlist || [];
       check('播放列表共 3 项', pl.length === 3, pl.map((x) => x.title).join(' | '));
 
-      // 暂停让它落盘：记录必须写在第 01 集上（而不是被追加的第 3 集）
-      await api('POST', '/api/player', { action: 'pause' });
-      await sleep(800);
+      // 停止让它落盘：进度必须写在第 01 集上（而不是被追加的第 3 集）
+      await stopPlaying();
       recEp = await getResume();
-      check('连播时记录写在第 01 集上（不会串到追加项）', !!recEp && recEp.path === ep1.path,
-        recEp ? `${recEp.path} pos=${recEp.pos}` : '没有记录');
+      check('连播时进度记在第 01 集上（不会串到追加项）', !!recEp && recEp.path === ep1.path,
+        recEp ? `${recEp.path} pos=${recEp.pos}` : '没有进度');
 
-      // 3) 点「继续观看」= 播这条记录：应当带上续播位置
-      r = await api('POST', '/api/play', {
-        albumId: album.id, path: recEp.path, mode: 'replace', loadSubs: true,
-        size: recEp.size, mtime: recEp.mtime,
-      });
-      check('剧集续播：请求带上了上次位置', !!(r.json && r.json.resumed > 0),
+      // 3) 切集时，上一个文件的进度也要被保存（实测 mpv 自己不会存，需要我们主动存）
+      await playEpisode(ep1, 'replace');
+      await sleep(3000);
+      await playEpisode(ep2, 'replace');        // 直接切到第 2 集，不先停止
+      await sleep(1000);
+      const ep1Key = wlKeyFor(`http://127.0.0.1:${APP_PORT}/stream/${state0.streamToken}/${album.id}${encodeURI(ep1.path)}`);
+      check('切集时上一个文件的进度被主动保存下来',
+        fs.existsSync(path.join(wlDir, ep1Key)), '第01集的进度条目');
+      const pathNow = await playerPath();
+      check('切集后播放状态指向第 02 集', pathNow === ep2.path, `path=${pathNow}`);
+
+      // 4) 点「继续观看」= 播最近这条：应当续播
+      recEp = await getResume();
+      r = await api('POST', '/api/play', { albumId: album.id, path: recEp.path, mode: 'replace', loadSubs: true });
+      check('剧集续播：接口报告了"将续播"', !!(r.json && r.json.resumed > 0),
         `resumed=${r.json && r.json.resumed} text=${r.json && r.json.resumedText}`);
-      await sleep(1200);
+      await sleep(1500);
       const posEp = (await api('GET', '/api/player')).json.player.position;
       check('剧集续播：mpv 实际跳到了上次位置', posEp >= recEp.pos - 1.5,
         `position=${posEp} 期望≈${recEp.pos}`);
-      await api('POST', '/api/player', { action: 'stop' });
-      await api('DELETE', '/api/resume');
+      await stopPlaying();
     } else if (ep1) {
       console.log('SKIP  剧集续播（回退模式无法采集位置）');
     }

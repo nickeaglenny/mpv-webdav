@@ -198,12 +198,33 @@ class MpvController extends EventEmitter {
     try { return !!p && fs.existsSync(p); } catch { return false; }
   }
 
-  // 我们自己的 mpv 实例与用户直接用 mpv 打开文件的世界完全隔离：
-  //   --no-save-position-on-quit : 绝不往 mpv 的全局 watch_later 目录写东西
-  //   --no-resume-playback       : 绝不读取那些东西（续播由本应用自己的记录负责）
-  // 这样即使 mpv.conf 里开了 save-position-on-quit，也不会互相污染。
-  isolationArgs() {
-    return ['--no-save-position-on-quit', '--no-resume-playback'];
+  // 进度交给 mpv 自己记：把它的 watch-later 目录**重定向**到我们的 data/cache 下，
+  // 而不是禁用。这样：
+  //   · 我们不再需要自己维护进度状态机（"看完没 / 什么时候存" 全由 mpv 决定）
+  //   · 仍然与"用户直接用 mpv 打开文件"完全隔离：两边读写的是不同目录，键也不同
+  //     （我们是 http 流地址，外部是本地路径）
+  // 只记 start（进度），不记音量/音轨等 50 多项，行为可预期。
+  watchLaterArgs() {
+    return [
+      '--watch-later-directory=' + this.store.watchLaterDir,
+      '--watch-later-options=start',
+      '--save-position-on-quit=yes',
+      '--write-filename-in-watch-later-config=yes',
+    ];
+  }
+
+  // 让 mpv 立刻把当前位置写进 watch-later。
+  // 必须显式调用的场合：切换文件（实测 loadfile replace 不会保存上一个文件的进度）、
+  // 停止、应用退出。暂停/关窗口 mpv 自己会存，这里只是双保险（幂等）。
+  async savePosition() {
+    if (this.mode !== 'ipc' || !this.ipc || !this.ipc.connected) return false;
+    if (!this.state.running || this.state.idle) return false;
+    try {
+      await this.ipc.send(['write-watch-later-config']);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   // 播放中按设置给 mpv 开「置顶 / 自动全屏」；空闲时一律取消（空窗口不该盖住桌面）。
@@ -240,7 +261,7 @@ class MpvController extends EventEmitter {
       '--force-window=yes',
       '--keep-open=no',
       '--idle=yes',
-      ...this.isolationArgs(),
+      ...this.watchLaterArgs(),
       // 启动时（还没开始播）不要置顶也不要全屏：空窗口不该盖住桌面。
       // 真正开始播放时再用 set_property 打开，见 _syncWindowState()。
       '--ontop=no',
@@ -259,14 +280,13 @@ class MpvController extends EventEmitter {
       '--no-terminal',
       '--force-window=yes',
       '--keep-open=yes',
-      ...this.isolationArgs(),
+      ...this.watchLaterArgs(),
       // 回退模式每个进程就播一个文件，直接按设置给参数
       '--ontop=' + (s.mpvOntop ? 'yes' : 'no'),
       '--fullscreen=' + (s.mpvAutoFullscreen ? 'yes' : 'no'),
       item.url,
       '--force-media-title=' + (item.title || item.name || ''),
     ];
-    if (Number.isFinite(item.start) && item.start > 0) args.push('--start=' + item.start);
     if (s.alang) args.push('--alang=' + s.alang);
     if (s.slang) args.push('--slang=' + s.slang);
     if (s.volume != null) args.push('--volume=' + s.volume);
@@ -565,6 +585,11 @@ class MpvController extends EventEmitter {
     this.state.subtitleTracks = 0;
 
     if (transport === 'ipc') {
+      // 切换文件前先让 mpv 把**上一个文件**的进度存下来。
+      // 实测：loadfile replace 不会触发保存，不主动存就会丢掉上一集的进度。
+      if (mode !== 'append' && this.state.running && !this.state.idle && this.state.path !== first.path) {
+        await this.savePosition();
+      }
       for (let i = 0; i < list.length; i++) {
         const item = list[i];
         const flags = mode === 'append' ? 'append' : (i === 0 ? 'replace' : 'append');
@@ -592,7 +617,7 @@ class MpvController extends EventEmitter {
       this.state.albumId = first.albumId;
       this.state.path = first.path;
       this.state.mediaTitle = first.title || first.name;
-      this.state.resumedFrom = Number.isFinite(first.start) && first.start > 0 ? first.start : 0;
+      this.state.resumedFrom = Number.isFinite(first.start) && first.start >= 0 ? first.start : 0;
       this.state.running = true;
       this.state.idle = false;
     }
@@ -603,7 +628,7 @@ class MpvController extends EventEmitter {
   async _loadfile(item, flags) {
     const urls = (item.subUrls || []).slice();
     const title = item.title || item.name || '';
-    const startAt = Number.isFinite(item.start) && item.start > 0 ? item.start : null;
+    const startAt = Number.isFinite(item.start) && item.start >= 0 ? item.start : null;
     const attempts = this._buildLoadAttempts(item.url, flags, urls, title, startAt);
     const start = this.subStrategy == null ? 0 : Math.min(this.subStrategy, attempts.length - 1);
 
@@ -640,7 +665,7 @@ class MpvController extends EventEmitter {
     const listSep = process.platform === 'win32' ? ';' : ':';
     const titleOpts = title ? { 'force-media-title': title } : {};
     // 续播位置：key/value list 的值必须是字符串，数字会被判为类型不符
-    if (startAt) titleOpts.start = startAt.toFixed(3);
+    if (startAt != null) titleOpts.start = startAt.toFixed(3);   // 0 也要显式传：用来压过 watch-later（从头播放）
     const attempts = [];
 
     if (subUrls.length) {
@@ -758,6 +783,7 @@ class MpvController extends EventEmitter {
         return this._after(await ipcCommand(['cycle', 'pause']));
       case 'stop':
         if (transport === 'ipc') {
+          await this.savePosition();          // 停下之前先把进度交给 mpv 存好
           await ipcCommand(['stop']);
         } else {
           if (this.spawnChild) { try { this.spawnChild.kill(); } catch {} this.spawnChild = null; }
@@ -858,6 +884,7 @@ class MpvController extends EventEmitter {
 
   async shutdown() {
     if (this.mode === 'ipc' && this.ipc) {
+      try { await this.savePosition(); } catch {}   // 退出前最后一次落盘
       try { await this.ipc.send(['quit']); } catch {}
       this.ipc.close();
     }

@@ -75,6 +75,15 @@ async function httpJson(url, options) {
   try { return { status: res.status, json: JSON.parse(text) }; } catch { return { status: res.status, json: null, text }; }
 }
 
+// 发一个 JSON POST（播放 / 停止等按钮背后的接口）
+function httpPost(url, body) {
+  return httpJson(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {}),
+  });
+}
+
 class Cdp {
   constructor(wsUrl) { this.wsUrl = wsUrl; this.id = 1; this.pending = new Map(); this.handlers = []; }
 
@@ -215,7 +224,7 @@ class Cdp {
     await httpJson(`http://127.0.0.1:${APP_PORT}/api/settings`, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        extraMpvArgs: ['--vo=null', '--ao=null', '--force-window=no', '--length=5',
+        extraMpvArgs: ['--vo=null', '--ao=null', '--force-window=no', '--length=30',
           '--msg-level=all=info', '--log-file=' + path.join(WORK, 'mpv.log')],
         // 测试片只有 12 秒：把阈值调小，才能在测试里看到「续播」
         resumeMinSeconds: 1,
@@ -370,16 +379,20 @@ class Cdp {
     fs.writeFileSync(path.join(WORK, 'ui-playing.png'), Buffer.from(shot2.data, 'base64'));
     check('已保存播放界面截图', fs.existsSync(path.join(WORK, 'ui-playing.png')));
 
-    // --- 「继续观看」：等进度落盘后按钮应出现，点它能续播
+    // --- 「继续观看」：播一集（20 秒的测试剧集）→ 停止（mpv 会存进度）→ 按钮应出现且能续播
+    await httpPost(`http://127.0.0.1:${APP_PORT}/api/play`,
+      { albumId: album.id, path: '/剧集/穹庐下的魔女 第01集.mp4', mode: 'replace', loadSubs: false });
+    await sleep(3000);
+    await httpPost(`http://127.0.0.1:${APP_PORT}/api/player`, { action: 'stop' });
     let rec = null;
-    for (let i = 0; i < 30; i++) {
+    for (let i = 0; i < 20; i++) {
       await sleep(500);
       const rr = await httpJson(`http://127.0.0.1:${APP_PORT}/api/resume`);
       rec = rr.json && rr.json.resume;
       if (rec && rec.pos > 0) break;
       rec = null;
     }
-    check('播放结束后服务端记录了进度', !!rec, rec ? `pos=${rec.pos} name=${rec.name}` : '没等到记录');
+    check('停止后服务端能从 mpv 的进度里读到记录', !!rec, rec ? `${rec.name} pos=${rec.pos}` : '没等到记录');
     if (rec) {
       await cdp.eval('refreshState()');     // 让页面把记录读回来
       await cdp.waitFor('!document.querySelector("#btn-resume").classList.contains("hidden")', 10000, '继续观看按钮出现');
@@ -394,6 +407,8 @@ class Cdp {
       const pos = p2.json && p2.json.player && p2.json.player.position;
       check('点「继续观看」后从上次位置接着播', typeof pos === 'number' && pos >= rec.pos - 1.5,
         `position=${pos} 期望≈${rec.pos}`);
+      await httpPost(`http://127.0.0.1:${APP_PORT}/api/player`, { action: 'stop' });
+      await sleep(500);
     }
 
     // --- settings dialog: 点遮罩不应该关闭

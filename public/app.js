@@ -842,18 +842,15 @@ function resumeEntry() {
   return {
     path: rec.path,
     name: rec.name || basename(rec.path),
-    size: rec.size,
-    mtime: rec.mtime,
     kind: 'video'
   };
 }
 
+// 记录现在由 mpv 按"流地址"保存，界面这边只比对专辑 + 路径
 function isResumeFor(entry) {
   var rec = state.resume;
   if (!rec || !entry || entry.isDir) return false;
-  if (rec.albumId !== state.browse.albumId || rec.path !== entry.path) return false;
-  if (typeof entry.size === 'number' && rec.size != null && entry.size !== rec.size) return false;
-  return true;
+  return rec.albumId === state.browse.albumId && rec.path === entry.path;
 }
 
 /** 工具栏上的「继续观看」按钮：仅当记录属于当前专辑时显示。 */
@@ -905,9 +902,7 @@ function playEntry(entry, mode, opts) {
     path: entry.path,
     mode: mode,
     loadSubs: true,
-    // 带上 size/mtime：服务端据此判断"上次那条进度"还算不算数（文件被换掉就不续播）
-    size: typeof entry.size === 'number' ? entry.size : undefined,
-    mtime: entry.mtime || undefined,
+    // 进度由 mpv 按流地址自动续播；只有「从头播放」需要服务端先删掉那条进度
     resume: options.resume === false ? false : undefined
   }).then(function (res) {
     if (res.player) applyPlayer(res.player);
@@ -947,9 +942,7 @@ function playAll() {
         albumId: state.browse.albumId,
         path: entry.path,
         mode: first ? 'replace' : 'append',
-        loadSubs: true,
-        size: typeof entry.size === 'number' ? entry.size : undefined,
-        mtime: entry.mtime || undefined
+        loadSubs: true
       }).then(function (res) {
         first = false;
         if (res.player) applyPlayer(res.player);
@@ -1177,8 +1170,11 @@ function applyPlayer(ps) {
   state.player = ps;
   renderPlayer();
   renderPlaylist();
-  /* 播放结束/停止时，服务端刚把进度落盘 —— 拉一次「继续观看」让工具栏按钮更新 */
-  if (wasActive && !isPlayerActive()) refreshResume(true);
+  /* 播放结束/停止时，mpv 需要一点时间把进度写进 watch-later：
+     稍等片刻再拉一次「继续观看」，按钮才会及时出现 */
+  if (wasActive && !isPlayerActive()) {
+    window.setTimeout(function () { refreshResume(true); }, 1200);
+  }
   if (ps.error) setStatus('播放器错误：' + ps.error, 'error');
 }
 
@@ -1581,6 +1577,8 @@ function openSettingsDialog() {
   $('#st-sub-encoding').value = st.subEncoding || 'auto';
   $('#st-mpv-ontop').checked = st.mpvOntop !== false;
   $('#st-mpv-fullscreen').checked = st.mpvAutoFullscreen === true;
+  $('#st-wl-max').value = String(typeof st.watchLaterMaxEntries === 'number' ? st.watchLaterMaxEntries : 200);
+  $('#st-wl-days').value = String(typeof st.watchLaterMaxDays === 'number' ? st.watchLaterMaxDays : 90);
   $('#st-alang').value = st.alang || '';
   $('#st-slang').value = st.slang || '';
   $('#st-extra-args').value = Array.isArray(st.extraMpvArgs) ? st.extraMpvArgs.join('\n') : '';
@@ -1609,6 +1607,8 @@ function saveSettingsFromDialog() {
     subEncoding: $('#st-sub-encoding').value,
     mpvOntop: !!$('#st-mpv-ontop').checked,
     mpvAutoFullscreen: !!$('#st-mpv-fullscreen').checked,
+    watchLaterMaxEntries: Math.max(0, parseInt($('#st-wl-max').value, 10) || 0),
+    watchLaterMaxDays: Math.max(0, parseInt($('#st-wl-days').value, 10) || 0),
     alang: $('#st-alang').value.trim(),
     slang: $('#st-slang').value.trim(),
     extraMpvArgs: String($('#st-extra-args').value || '').split(/\r?\n/)
@@ -1635,6 +1635,19 @@ function bindSettingsDialog() {
   $('#dlg-settings').addEventListener('click', function (ev) {
     if (ev.target.dataset && ev.target.dataset.close) closeSettingsDialog();
   });
+  var pruneBtn = $('#st-wl-prune');
+  if (pruneBtn) {
+    pruneBtn.addEventListener('click', function () {
+      pruneBtn.disabled = true;
+      api('POST', API.resume + '/prune', {}).then(function (res) {
+        var removed = res && res.result ? res.result.removed : 0;
+        toast('success', '已清理 ' + removed + ' 条过期进度');
+        return refreshResume(true);
+      }).catch(function (err) {
+        toast('error', '清理失败：' + err.message);
+      }).then(function () { pruneBtn.disabled = false; });
+    });
+  }
 }
 
 /* ============================ 13. 顶部状态 / 全局刷新 ============================ */

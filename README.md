@@ -113,31 +113,32 @@ pwsh -NoProfile -File .\tools\autostart.ps1 -Uninstall   # 取消
 目录操作：**双击文件夹进入**（也可以点行内 **进入** 按钮，或选中后按回车），单击只做选中；
 工具栏 **↑ 上级** 或点面包屑返回。
 
-### 续播：只记最近一次
+### 续播：交给 mpv 自己记（watch-later）
 
-播到一半退出（关窗口、点停止、Ctrl+C 关服务都算），下次再点**同一个文件**会从上次位置继续：
+不再由本应用维护"看到哪了"的状态机 —— **进度是 mpv 自己写的**，我们只负责显示、删除和清理：
 
-- 记录只写一份 `data/last-played.json`，**恒定一条、约 200 字节**，不会随观看数量增长；
-- 落盘时机：播放中每 30 秒、暂停、停止/播完、服务退出；
-- 双阈值：看了不到 5%（且不足 30 秒）视为没看、不记；距结尾不足 60 秒视为看完，**自动清除**；
-- 工具栏会出现 **▶ 继续 12:34** 按钮（**Shift+点击 = 清除记录**）；
-- **一个目录里有多集时，记录始终跟着「真正在播的那一集」**，不会串到播放列表里其它集；
-- 播放请求会带上文件大小做校验：**文件换过版本就不续播**，从头开始（时间戳只作参考，避免"明明有记录却不续播"）；
-- 没续播时日志会写明原因（如 `上次进度不适用于本次播放（size-changed）`），托盘菜单「查看日志」可直接打开；
-- 想从头看：该文件行尾 **⋯ → ↺ 从头播放**；
+- 进度存在 `data/cache/watch-later/`，**每个看到一半的文件一条**（文件名 = 该流地址的 MD5）；
+- 什么时候存由 mpv 决定：**停止 / 关窗口 / 退出 / 切集前**（我们会主动让 mpv 存一次，实测它自己不会在切集时存）；
+- 播到结尾不留进度（=看完），下次自然从头开始；
+- 工具栏出现 **▶ 继续 12:34** 按钮（**Shift+点击 = 清除这一条**）；
+- 想从头看：该文件行尾 **⋯ → ↺ 从头播放**（会删掉那条进度，并用 `start=0` 明确压过续播）；
+- 清理：超过「条数上限」（默认 200）或「天数上限」（默认 90 天）的自动清掉，可在设置里改，也能点「立即清理一次」；
 - mpv 里按 **Shift+BACKSPACE** 可退回跳转前的位置。
 
-阈值可在「设置」里调（`resumeMinSeconds` / `resumeMinPercent` / `resumeEndGuardSeconds`）。
+> 因为进度是按**流地址**记的：**换端口或删掉 `data/state/instance.json` 会让已有进度失联**（重新生成令牌即可，代价只是旧进度找不到）。
+> 另外 http 地址没有文件时间戳，所以"同一个路径换了文件"时 mpv 仍会按旧位置续播——这时候用「从头播放」即可。
 
 ### 和你直接用 mpv 打开文件：互不影响
 
-本应用启动的 mpv 实例固定带 `--no-save-position-on-quit` 和 `--no-resume-playback`：
+本应用启动的 mpv 实例把进度目录**重定向**到 `data/cache/watch-later/`（`--watch-later-directory` + `--watch-later-options=start`），
+而不是关掉这个功能——这样既让 mpv 记账，又和你自己的 mpv 完全分开：
 
 | 场景 | 结果 |
 | --- | --- |
 | 你在资源管理器双击视频（mpv 是默认播放器） | 读写的是 mpv 自己的 `%APPDATA%\mpv\watch_later\`，**与本应用无关**，本应用也不会去读 |
-| 本应用的续播 | 只读写 `data\last-played.json`，外部 mpv 看不到、也不会改 |
+| 本应用的续播 | 只读写 `data\cache\watch-later\`，外部 mpv 看不到、也不会改 |
 | 两边同时开着 watch-later | 键天然不同：外部是本地路径 `C:\…` 的 MD5，本应用走的是 `http://127.0.0.1/…` 代理 URL，不会串 |
+| 你 mpv.conf 里的设置 | 仍然生效；只有上面这几个跟进度有关的参数被我们显式指定 |
 
 也就是说：**应用内外的播放进度完全隔离，互不影响**。
 
@@ -231,7 +232,8 @@ mpv-webdav/
 | alang / slang | `zh,chi,zho,eng` | 音轨 / 字幕语言优先级 |
 | 附加 mpv 参数 | 空 | 每行一个 |
 | 默认音量 | 100 | 新开的 mpv 使用该音量 |
-| 续播阈值 | 30 秒 / 5% / 结尾 60 秒 | 低于前者不记（没看），进入后者算看完（清除） |
+| 播放进度：最多保留条数 | 200 | mpv 的 watch-later 条目超过就按最近使用清理 |
+| 播放进度：最多保留天数 | 90 | 超过天数没动过的进度自动清掉（0 = 不限制） |
 | 播放时置顶 mpv | 开 | 播放/暂停期间置顶，空闲自动取消 |
 | 播放时自动全屏 mpv | 关 | 开了就按播放直接满屏 |
 
@@ -266,8 +268,11 @@ node tools\probe-ipc.js
 :: 验证专辑配置的自动备份 / 误删恢复（只操作 tools\.storetest）
 node tools\store-test.js
 
-:: 续播逻辑单测（阈值判定、记录匹配、落盘/恢复，不需要 mpv）
+:: 播放进度逻辑单测（md5 键、读写删、LRU 清理、旧进度迁移，不需要 mpv）
 node tools\resume-test.js
+
+:: data/ 目录结构、旧文件搬迁、固定令牌、进度上限（不需要 mpv）
+node tools\state-test.js
 
 :: 字幕编码：单元测试 + 对着真实服务器查某个字幕文件的编码
 node tools\encoding-test.js
@@ -356,18 +361,19 @@ $p='start.bat'; [IO.File]::WriteAllText($p, ([IO.File]::ReadAllText($p) -replace
 | --- | --- | --- | --- |
 | `data/albums.json`（+`.bak`） | 配置 | **不能删** | 你建的所有专辑（**密码是明文**，因为服务要用它登录 WebDAV） |
 | `data/settings.json`（+`.bak`） | 配置 | **不能删** | 设置项 |
-| `data/state/recent.json` | 状态 | 能删（只丢"继续观看"提示） | 最近一次的播放进度快照（恒定一条） |
 | `data/state/instance.json` | 状态 | 建议别删 | 固定的流地址令牌；删了会重新生成（旧进度会失联） |
 | `data/state/views.json` | 状态 | 能删 | 每个专辑最后浏览的目录（后续版本使用） |
-| `data/cache/` | 缓存 | **随便删** | mpv 自己的进度文件等 |
+| `data/state/recent.json.bak` | 状态 | 能删 | 升级前那版"自管进度"的备份（已不再使用，仅作留念/手工恢复） |
+| `data/cache/watch-later/` | 缓存 | **随便删** | 播放进度（mpv 自己写的，每个看到一半的文件一条） |
+| `data/cache/` 其它 | 缓存 | **随便删** | 其它临时/缓存文件 |
 
 规则：**任何要落盘的东西只能放进这三类之一，并且必须有上限或清理方式**；`data/` 根目录只放配置文件。
 
 - 每次保存前，程序会先把现有文件另存为 `.bak`；
 - 启动时如果 `albums.json` **被删掉或写坏了**，会自动从 `.bak` 恢复并在控制台提示，恢复后重建主文件；
 - 所以最坏情况下你只会丢掉"最后一次修改"，不会丢掉整个专辑列表；
-- 旧版本的 `data/last-played.json` 会在启动时**自动迁移**到 `data/state/recent.json` 并删除旧文件；如果旧文件已经损坏，会**原样**挪到 `data/state/recent.json.corrupt`（绝不悄悄丢弃）；
-- 想手动兜底的话，直接复制一份 `data\albums.json` 到别处即可（`node tools\store-test.js` 与 `node tools\state-test.js` 可以验证上面这些行为）。
+- 旧版本自己记的进度（`data/last-played.json` / `data/state/recent.json`）会在启动时**转成 mpv 的进度条目**，然后删掉那个快照文件（内容已经搬进 `cache/watch-later/`，不会丢）；
+- 想手动兜底的话，直接复制一份 `data\albums.json` 到别处即可（`node tools\store-test.js`、`node tools\state-test.js`、`node tools\resume-test.js` 可以验证上面这些行为）。
 
 ## 10. 安全与隐私
 

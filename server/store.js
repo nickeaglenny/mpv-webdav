@@ -22,10 +22,9 @@ const DEFAULT_SETTINGS = {
   // auto = 自动检测编码并转成 UTF-8；off = 原样转发交给 mpv；也可强制某个编码
   subEncoding: 'auto',
   subTranscodeMaxBytes: 8 * 1024 * 1024,
-  // 「只记最近一次」的播放进度阈值（见 server/resume.js）
-  resumeMinSeconds: 30,
-  resumeMinPercent: 5,
-  resumeEndGuardSeconds: 60,
+  // 播放进度由 mpv 自己记（watch-later），这里只定它的清理上限
+  watchLaterMaxEntries: 200,  // 最多保留多少条进度
+  watchLaterMaxDays: 90,      // 超过多少天没动过的进度自动清掉（0 = 不按天数清）
   // 播放时的 mpv 窗口行为
   mpvOntop: true,             // 播放中把 mpv 窗口置顶（空闲时自动取消，避免挡住桌面）
   mpvAutoFullscreen: false,   // 播放中自动全屏（默认关闭）
@@ -78,19 +77,17 @@ class Store {
     this.dataDir = dataDir;
     // data/ 分三类，避免越用越乱：
     //   根目录        ：配置（albums.json / settings.json），要备份、别手改坏
-    //   state/        ：运行状态（recent.json 进度快照 / instance.json 固定令牌 / views.json 浏览位置），有界
-    //   cache/        ：缓存（watch-later 等 mpv 自己的文件），整个目录可随手删
+    //   state/        ：运行状态（instance.json 固定令牌 / views.json 浏览位置），有界
+    //   cache/        ：缓存（watch-later 播放进度等 mpv 自己的文件），整个目录可随手删
     this.stateDir = path.join(dataDir, 'state');
     this.cacheDir = path.join(dataDir, 'cache');
+    this.watchLaterDir = path.join(this.cacheDir, 'watch-later');
     this.albumsFile = path.join(dataDir, 'albums.json');
     this.settingsFile = path.join(dataDir, 'settings.json');
-    this.resumeFile = path.join(this.stateDir, 'recent.json');
     this.instanceFile = path.join(this.stateDir, 'instance.json');
     ensureDir(dataDir);
     ensureDir(this.stateDir);
     ensureDir(this.cacheDir);
-
-    this.migrateLegacyFiles();
 
     const albumsRead = readJsonWithBackup(this.albumsFile);
     this.albums = Array.isArray(albumsRead.value) ? albumsRead.value : [];
@@ -108,60 +105,32 @@ class Store {
     if (!this.settings.mpvPath) this.settings.mpvPath = defaultMpvPath;
     if (settingsRead.recovered) this.saveSettings({ backup: false });
 
-    // 最近一次播放进度快照：只有一个文件、一条记录。
-    // 注意：这里**不走 .bak 回退**——进度是可重建的小数据，
-    // 主文件缺失时从旧备份"复活"一个已经失效的位置只会造成困惑。
-    const resumeValue = readJson(this.resumeFile, null);
-    this.resume = resumeValue && typeof resumeValue === 'object' ? resumeValue : null;
-
     this.instance = null;
   }
 
-  // 旧的 .bak 是用户数据：不删，挪到 state/ 下当 recent.json 的备份（目标已存在才丢弃）
-  moveLegacyBak(legacy) {
-    const legacyBak = legacy + '.bak';
-    if (!fs.existsSync(legacyBak)) return;
-    const newBak = this.resumeFile + '.bak';
-    try {
-      if (!fs.existsSync(newBak)) fs.renameSync(legacyBak, newBak);
-      else fs.rmSync(legacyBak, { force: true });
-    } catch { /* 挪不动就留着，不影响启动 */ }
-  }
-
-  // 旧版本把进度写在 data/last-played.json；搬到 state/recent.json 后清理旧文件（一次性）
-  migrateLegacyFiles() {
+  // 旧版本把「自管的进度快照」写在 data/last-played.json（后来是 data/state/recent.json）。
+  // 现在进度交给 mpv 了，这里只负责把旧快照搬到 state/ 下（不改内容、不解析），
+  // 由 index.js 在启动时转成 mpv 的条目后删除。老文件坏掉也不会影响启动。
+  migrateLegacySnapshot() {
     const legacy = path.join(this.dataDir, 'last-played.json');
+    const target = path.join(this.stateDir, 'recent.json');
+    const moved = [];
     try {
-      if (!fs.existsSync(legacy)) return false;
-      let parsed = null;
-      try {
-        parsed = JSON.parse(fs.readFileSync(legacy, 'utf8'));
-      } catch (err) {
-        // 旧文件坏了：不删、不覆盖任何东西，挪到 state/ 下留个 .corrupt 备份，避免每次启动都报警
-        const quarantine = path.join(this.stateDir, 'recent.json.corrupt');
-        if (!fs.existsSync(quarantine)) {
-          fs.renameSync(legacy, quarantine);
-          console.warn('[store] data/last-played.json 内容无法解析，已挪到 data/state/recent.json.corrupt（内容未改动）');
-          this.moveLegacyBak(legacy);
-        } else {
-          console.warn('[store] data/last-played.json 内容无法解析，且 state/recent.json.corrupt 已存在，保留原文件未动');
-        }
-        // 明确写下"没有进度"，避免主文件缺失时又从 .bak 里翻出旧记录
-        if (!fs.existsSync(this.resumeFile)) writeJsonAtomic(this.resumeFile, null, { backup: false });
-        return false;
+      if (!fs.existsSync(legacy)) return moved;
+      if (!fs.existsSync(target)) fs.renameSync(legacy, target);
+      else fs.rmSync(legacy, { force: true });
+      moved.push(target);
+      const legacyBak = legacy + '.bak';
+      const targetBak = target + '.bak';
+      if (fs.existsSync(legacyBak)) {
+        if (!fs.existsSync(targetBak)) fs.renameSync(legacyBak, targetBak);
+        else fs.rmSync(legacyBak, { force: true });
       }
-      // 旧文件是有效记录就搬过来；是 null（没有进度）就明确写 null，别让 .bak 里的旧值复活
-      const hasRecord = parsed && typeof parsed === 'object';
-      if (!fs.existsSync(this.resumeFile)) {
-        writeJsonAtomic(this.resumeFile, hasRecord ? parsed : null, { backup: false });
-      }
-      this.moveLegacyBak(legacy);
-      fs.rmSync(legacy, { force: true });
-      console.log('[store] 已把 data/last-played.json 迁移到 data/state/recent.json');
-      return true;
+      console.log('[store] 发现旧版进度快照，已挪到 data/state/recent.json（稍后转成 mpv 的进度）');
+      return moved;
     } catch (err) {
-      console.warn('[store] 迁移 last-played.json 失败（保留原文件）：' + err.message);
-      return false;
+      console.warn('[store] 迁移旧进度快照失败（保留原文件）：' + err.message);
+      return moved;
     }
   }
 
@@ -201,23 +170,6 @@ class Store {
 
   saveAlbums(opts) { writeJsonAtomic(this.albumsFile, this.albums, opts); }
   saveSettings(opts) { writeJsonAtomic(this.settingsFile, this.settings, opts); }
-  saveResume(opts) { writeJsonAtomic(this.resumeFile, this.resume, opts); }
-
-  // ---- 最近一次播放进度 ---------------------------------------------------
-  getResume() { return this.resume; }
-
-  setResume(record) {
-    this.resume = record;
-    this.saveResume();
-    return this.resume;
-  }
-
-  clearResume() {
-    if (this.resume === null) return null;
-    this.resume = null;
-    this.saveResume();
-    return null;
-  }
 
   // ---- albums -------------------------------------------------------------
   static sanitize(input, existing) {
@@ -310,10 +262,14 @@ class Store {
     if (src.subTranscodeMaxBytes !== undefined) {
       next.subTranscodeMaxBytes = Math.min(64 * 1024 * 1024, Math.max(64 * 1024, parseInt(src.subTranscodeMaxBytes, 10) || 8 * 1024 * 1024));
     }
-    for (const key of ['resumeMinSeconds', 'resumeMinPercent', 'resumeEndGuardSeconds']) {
-      if (src[key] === undefined) continue;
-      const v = parseInt(src[key], 10);
-      next[key] = Number.isFinite(v) && v >= 0 ? v : next[key];
+    // watch-later 清理上限（进度由 mpv 记，这里只管"留多少、留多久"）
+    if (src.watchLaterMaxEntries !== undefined) {
+      const v = parseInt(src.watchLaterMaxEntries, 10);
+      next.watchLaterMaxEntries = Number.isFinite(v) && v >= 0 ? Math.min(100000, v) : next.watchLaterMaxEntries;
+    }
+    if (src.watchLaterMaxDays !== undefined) {
+      const v = parseInt(src.watchLaterMaxDays, 10);
+      next.watchLaterMaxDays = Number.isFinite(v) && v >= 0 ? Math.min(3650, v) : next.watchLaterMaxDays;
     }
     if (src.mpvOntop !== undefined) next.mpvOntop = !!src.mpvOntop;
     if (src.mpvAutoFullscreen !== undefined) next.mpvAutoFullscreen = !!src.mpvAutoFullscreen;

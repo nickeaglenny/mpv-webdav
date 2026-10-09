@@ -12,7 +12,7 @@ const { Store } = require('./store');
 const { WebDAVClient, WebDAVError, normalizeRel } = require('./webdav');
 const media = require('./media');
 const textEncoding = require('./text-encoding');
-const resume = require('./resume');
+const watchlater = require('./watchlater');
 const { MpvController } = require('./mpv');
 
 const ROOT = path.join(__dirname, '..');
@@ -38,75 +38,95 @@ const sseClients = new Set();
 const clientCache = new Map();
 
 mpv.on('player', (state) => {
-  resumeOnPlayerEvent(state);
   broadcast('player', state);
 });
 mpv.on('log', (entry) => broadcast('log', entry));
 
-// ---------------------------------------------- 「只记最近一次」播放进度 ---
-// 数据来源就是播放器状态里的 time-pos（IPC 模式每 ~400ms 一次），
-// 节流写盘：播放中最多每 30 秒一次，暂停/停止/切集/退出时立即写。
-const RESUME_FLUSH_MS = 30000;
-const resumeTracker = { albumId: null, path: null, name: '', pos: 0, dur: 0, size: null, mtime: null };
-let lastPlayedMeta = null;      // handlePlay 写入：{ albumId, path, name, size, mtime }
-let lastResumeFlush = 0;
-let wasRunning = false;
+// ------------------------------------------------------- 播放进度（mpv 记账）---
+// 进度由 mpv 自己写进 data/cache/watch-later/，我们只做三件事：
+//   读出来给界面显示 / 「从头播放」时删掉某一条 / 按上限做 LRU 清理。
+// 不再有任何"我们判断何时该存、什么算看完"的状态机。
 
-function resumeFlush(force = false) {
-  if (!resumeTracker.albumId || !resumeTracker.path) return;
-  const now = Date.now();
-  if (!force && now - lastResumeFlush < RESUME_FLUSH_MS) return;
-  lastResumeFlush = now;
-  const verdict = resume.decide(resumeTracker.pos, resumeTracker.dur, store.settings);
-  if (verdict === 'remember') {
-    store.setResume(resume.buildRecord({
-      albumId: resumeTracker.albumId,
-      path: resumeTracker.path,
-      name: resumeTracker.name,
-      pos: resumeTracker.pos,
-      dur: resumeTracker.dur,
-      size: resumeTracker.size,
-      mtime: resumeTracker.mtime,
-    }, now));
-  } else if (verdict === 'clear') {
-    // 只有「正在播的这个文件」自己不该记时才清；否则保留上一条
-    // （刚开播另一部片子时不应该把上次那部的进度抹掉）
-    const stored = store.getResume();
-    if (stored && stored.albumId === resumeTracker.albumId && stored.path === resumeTracker.path) {
-      store.clearResume();
+const WL_DIR = store.watchLaterDir;
+watchlater.ensureDir(WL_DIR);              // mpv 不会自己建目录
+
+// 旧版把进度存在 data/state/recent.json：搬进 state/ 再转成 mpv 的格式（一次性）
+store.migrateLegacySnapshot();
+migrateLegacySnapshot();
+
+function wlUrlFor(albumId, relPath) {
+  return streamUrl(albumId, relPath);   // 与 mpv 实际请求的地址完全一致（键 = MD5(该地址)）
+}
+
+// 「最近有进度的那一条」→ 界面需要的形状
+function currentResume() {
+  for (const entry of watchlater.scan(WL_DIR)) {
+    const parsed = watchlater.parseStreamUrl(entry.target, TOKEN);
+    if (!parsed) continue;                                  // 不是我们这台实例的地址（换过端口/token）
+    const album = store.albums.find((a) => a.id === parsed.albumId);
+    if (!album) continue;                                   // 专辑已被删掉
+    return {
+      albumId: parsed.albumId,
+      path: parsed.path,
+      name: parsed.path.split('/').pop() || parsed.path,
+      pos: entry.pos,
+      updatedAt: entry.updatedAt,
+    };
+  }
+  return null;
+}
+
+function pruneWatchLater() {
+  const s = store.settings;
+  try {
+    const r = watchlater.prune(WL_DIR, {
+      maxEntries: s.watchLaterMaxEntries,
+      maxAgeDays: s.watchLaterMaxDays,
+    });
+    if (r.removed > 0) {
+      mpv.emit('log', { level: 'info', message: `已清理 ${r.removed} 条过期播放进度（保留上限 ${s.watchLaterMaxEntries} 条 / ${s.watchLaterMaxDays} 天）` });
     }
+    return r;
+  } catch (err) {
+    mpv.emit('log', { level: 'warn', message: '清理播放进度失败：' + err.message });
+    return null;
   }
 }
 
-function resumeOnPlayerEvent(state) {
-  if (!state) return;
-  // 停止 / 播完 / 暂停：先把上一刻的位置落盘（此时 state.position 可能已被清零）
-  if (wasRunning && (!state.running || state.paused)) resumeFlush(true);
-
-  const sameItem = resumeTracker.albumId === state.albumId && resumeTracker.path === state.path;
-  if (!sameItem) {
-    if (resumeTracker.path) resumeFlush(true);
-    resumeTracker.albumId = state.albumId || null;
-    resumeTracker.path = state.path || null;
-    resumeTracker.name = state.mediaTitle || '';
-    resumeTracker.pos = 0;
-    resumeTracker.dur = 0;
-    const meta = lastPlayedMeta;
-    const known = meta && meta.albumId === state.albumId && meta.path === state.path ? meta : null;
-    resumeTracker.size = known ? known.size : null;
-    resumeTracker.mtime = known ? known.mtime : null;
-    if (known && known.name) resumeTracker.name = known.name;
-    // 刚换片时位置还没有意义：等满一个节流周期或等停止/暂停时再写，
-    // 避免"刚开始播就把上一条记录清掉"。
-    lastResumeFlush = Date.now();
+// 把旧版本"我们自己记的进度快照"转成 mpv 的条目（一次性），然后删掉快照
+function migrateLegacySnapshot() {
+  const snapshot = path.join(store.stateDir, 'recent.json');
+  if (!fs.existsSync(snapshot)) return null;
+  let record = null;
+  try {
+    record = JSON.parse(fs.readFileSync(snapshot, 'utf8'));
+  } catch (err) {
+    const quarantine = path.join(store.stateDir, 'recent.json.corrupt');
+    if (!fs.existsSync(quarantine)) {
+      try {
+        fs.renameSync(snapshot, quarantine);
+        console.warn('[migrate] 旧进度快照无法解析，已挪到 data/state/recent.json.corrupt（内容未改动）');
+      } catch { /* 挪不动就留着 */ }
+    }
+    return null;
   }
-
-  if (Number.isFinite(state.duration) && state.duration > 0) resumeTracker.dur = state.duration;
-  if (Number.isFinite(state.position) && state.position > 0) resumeTracker.pos = state.position;
-  if (state.mediaTitle) resumeTracker.name = state.mediaTitle;
-
-  if (state.running && !state.idle) resumeFlush(false);
-  wasRunning = state.running;
+  if (record && record.albumId && record.path && Number(record.pos) > 0) {
+    const r = watchlater.migrateLegacyRecord(WL_DIR, streamUrl(record.albumId, record.path), record.pos);
+    if (r && !r.skipped) {
+      console.log(`[migrate] 已把旧进度转成 mpv 的条目：${record.path} @ ${watchlater.formatClock(record.pos)}`);
+    }
+  } else {
+    console.log('[migrate] 旧进度快照里没有可用的进度（为空），不生成新条目');
+  }
+  // 只删掉这个已经没用的快照主文件；**它的 .bak 属于用户数据，保留在原地**（README 里有说明，可随手删）
+  try {
+    fs.rmSync(snapshot, { force: true });
+    if (fs.existsSync(snapshot + '.bak')) {
+      console.log('[migrate] 旧快照的备份保留在 data/state/recent.json.bak（不再使用，可随时删）');
+    }
+    console.log('[migrate] 进度现在由 mpv 记在 data/cache/watch-later/');
+  } catch { /* 删不掉也不影响 */ }
+  return record;
 }
 
 // ---------------------------------------------------------------- helpers ---
@@ -220,7 +240,7 @@ async function buildState() {
     },
     settings: store.publicSettings(),
     albums: store.listAlbums(),
-    resume: store.getResume(),
+    resume: currentResume(),
     player: mpv.getState(),
   };
 }
@@ -336,24 +356,18 @@ async function handlePlay(body) {
     }
   }
 
-  // 「只记最近一次」续播：只有在看的就是上次那个文件、且大小没变时才跳转。
-  // body.size / body.mtime 由前端从目录列表带过来，避免额外一次 PROPFIND。
-  const stored = store.getResume();
-  const size = Number.isFinite(body.size) ? body.size : null;
-  const mtime = body.mtime || null;
-  let startAt = null;
-  if (resume.matches(stored, { albumId: album.id, path: rel, size })) {
-    if (body.resume === false) {
-      store.clearResume();          // 「从头播放」：顺手把旧进度清掉
-    } else {
-      startAt = stored.pos;
-    }
-  } else if (stored) {
-    // 有记录但用不上：把原因写进日志，方便排查「为什么不续播」
-    mpv.emit('log', {
-      level: 'info',
-      message: `上次进度不适用于本次播放（${resume.mismatchReason(stored, { albumId: album.id, path: rel, size })}）：${stored.name || stored.path}`,
-    });
+  // 续播交给 mpv：它自己会在加载时读取 watch-later 里的 start。
+  // 「从头播放」两手都要：①删掉那条进度（界面/接口不再报它）②显式 start=0，
+  // 因为 mpv 在**同文件重载**时会先把旧位置存回去，只删文件会被立刻写回来。
+  const url = streamUrl(album.id, rel);
+  let entry = null;
+  let forceStart = null;
+  if (body.resume === false) {
+    const removed = watchlater.removeEntry(WL_DIR, url);
+    forceStart = 0;
+    if (removed) mpv.emit('log', { level: 'info', message: `已清除该文件的播放进度（从头播放）：${name}` });
+  } else {
+    entry = watchlater.readEntry(WL_DIR, url);
   }
 
   const item = {
@@ -361,24 +375,31 @@ async function handlePlay(body) {
     path: rel,
     name,
     title: name,
-    url: streamUrl(album.id, rel),
+    url,
     subUrls: subtitles.map((s) => streamUrl(album.id, s.path)),
     subNames: subtitles.map((s) => s.name),
   };
-  if (startAt) item.start = startAt;
-  lastPlayedMeta = { albumId: album.id, path: rel, name, size, mtime };
+  if (forceStart != null) item.start = forceStart;
 
   const mode = body.mode === 'append' ? 'append' : 'replace';
-  if (startAt) {
-    mpv.emit('log', { level: 'info', message: `从上次位置继续：${resume.describe(stored)}` });
+  if (entry) {
+    mpv.emit('log', { level: 'info', message: `从上次位置继续：${watchlater.describe(entry, name)}` });
   }
   const player = await mpv.play([item], { mode });
+
+  if (forceStart === 0) {
+    // mpv 在"同文件重载"时会把旧位置又写回条目（实测），所以加载完之后再清一次，
+    // 让「从头播放」真的从零开始记账（之后的停止/退出仍由 mpv 正常保存）。
+    const timer = setTimeout(() => watchlater.removeEntry(WL_DIR, url), 700);
+    if (timer.unref) timer.unref();
+  }
+
   return {
     ok: true,
     item: { albumId: album.id, path: rel, name, title: name },
     subtitles: item.subNames,
-    resumed: startAt,
-    resumedText: startAt ? resume.describe(stored) : '',
+    resumed: entry ? entry.pos : null,
+    resumedText: entry ? `${name} · ${watchlater.formatClock(entry.pos)}` : '',
     player,
   };
 }
@@ -594,14 +615,26 @@ async function route(req, res, parsed) {
     }
   }
 
-  // ---- 最近一次播放进度（只记一条）
+  // ---- 播放进度（进度本身存在 mpv 的 watch-later 目录里，这里只是读取视图）
   if (pathname === '/api/resume' && method === 'GET') {
-    const rec = store.getResume();
-    return sendJson(res, 200, { ok: true, resume: rec, text: rec ? resume.describe(rec) : '' });
+    const rec = currentResume();
+    return sendJson(res, 200, {
+      ok: true,
+      resume: rec,
+      text: rec ? `${rec.name} · ${watchlater.formatClock(rec.pos)}` : '',
+      // 顺带把目录规模报给界面/排查用
+      entries: watchlater.scan(WL_DIR).length,
+      dir: WL_DIR,
+    });
   }
   if (pathname === '/api/resume' && method === 'DELETE') {
-    store.clearResume();
-    return sendJson(res, 200, { ok: true, resume: null });
+    // 只清掉"最近这一条"（界面上的 Shift+点击），不要一把清空所有进度
+    const rec = currentResume();
+    const removed = rec ? watchlater.removeEntry(WL_DIR, wlUrlFor(rec.albumId, rec.path)) : false;
+    return sendJson(res, 200, { ok: true, resume: currentResume(), removed });
+  }
+  if (pathname === '/api/resume/prune' && method === 'POST') {
+    return sendJson(res, 200, { ok: true, result: pruneWatchLater(), resume: currentResume() });
   }
 
   // ---- browse
@@ -637,8 +670,14 @@ async function route(req, res, parsed) {
     const prevPath = store.settings.mpvPath;
     const prevOntop = store.settings.mpvOntop;
     const prevFullscreen = store.settings.mpvAutoFullscreen;
+    const prevWlEntries = store.settings.watchLaterMaxEntries;
+    const prevWlDays = store.settings.watchLaterMaxDays;
     const settings = store.updateSettings(body);
     if (settings.mpvPath !== prevPath) mpvVersionCache = null;
+    // 进度上限改小了：立刻按新上限清一次，让设置"看起来就是生效的"
+    if (settings.watchLaterMaxEntries !== prevWlEntries || settings.watchLaterMaxDays !== prevWlDays) {
+      pruneWatchLater();
+    }
     mpv.state.volume = settings.volume;
     // 正在播放时改「置顶 / 自动全屏」，立即作用到当前 mpv
     if (settings.mpvOntop !== prevOntop) mpv.applySettingChange('mpvOntop');
@@ -703,9 +742,16 @@ server.listen(PORT, HOST, async () => {
   console.log('  专辑:     ' + store.albums.length + ' 个' +
     (store.albums.length ? '（' + store.albums.map((a) => a.name).join('、') + '）' : '（还没有专辑，点右上角「+ 新建专辑」）'));
   console.log('  mpv:      ' + (found ? store.settings.mpvPath + (version ? '  (v' + version + ')' : '') : '未找到，请在设置里指定'));
+  console.log('  播放进度: mpv 自己记在 data/cache/watch-later/（上限 ' +
+    store.settings.watchLaterMaxEntries + ' 条 / ' + store.settings.watchLaterMaxDays + ' 天）');
   console.log('  ────────────────────────────────────────────');
   console.log('  按 Ctrl+C 退出');
   console.log('');
+  // 启动后延迟清一次历史进度，之后每天一次（不阻塞启动，也不影响正在播的文件）
+  const pruneTimer = setTimeout(pruneWatchLater, 5000);
+  if (pruneTimer.unref) pruneTimer.unref();
+  const dailyTimer = setInterval(pruneWatchLater, 24 * 3600 * 1000);
+  if (dailyTimer.unref) dailyTimer.unref();
   if (OPEN_BROWSER) {
     try {
       const { spawn } = require('child_process');
@@ -722,8 +768,8 @@ async function gracefulShutdown(reason) {
   if (shuttingDown) return;
   shuttingDown = true;
   if (reason !== 'api') console.log('\n正在关闭…');
-  try { resumeFlush(true); } catch { /* 退出前尽力保存进度 */ }
   for (const res of sseClients) { try { res.write('event: bye\ndata: {}\n\n'); res.end(); } catch {} }
+  // mpv.shutdown() 内部会先让 mpv 保存当前进度再退出
   try { await mpv.shutdown(); } catch { /* ignore */ }
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 1500);

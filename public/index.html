@@ -266,6 +266,23 @@
       </div>
       <div class="grid-2">
         <div class="field">
+          <label class="label" for="st-wl-max">播放进度：最多保留条数</label>
+          <input class="input" id="st-wl-max" type="number" min="0" step="10" value="200">
+        </div>
+        <div class="field">
+          <label class="label" for="st-wl-days">播放进度：最多保留天数</label>
+          <input class="input" id="st-wl-days" type="number" min="0" step="10" value="90">
+        </div>
+      </div>
+      <div class="field">
+        <div class="help">
+          进度由 <strong>mpv 自己</strong>记录在 <code>data/cache/watch-later/</code>（每个看过一半的文件一条），
+          超过条数或天数的会自动清理（<code>0</code> = 该项不限制）。
+          <button class="btn btn-sm" id="st-wl-prune" type="button">立即清理一次</button>
+        </div>
+      </div>
+      <div class="grid-2">
+        <div class="field">
           <label class="label" for="st-alang">默认音轨语言 alang</label>
           <input class="input" id="st-alang" type="text" spellcheck="false" placeholder="jpn,chi,eng">
         </div>
