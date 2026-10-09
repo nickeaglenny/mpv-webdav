@@ -474,6 +474,21 @@ class Cdp {
       check('已保存进度条截图', fs.existsSync(path.join(WORK, 'ui-progress.png')));
     }
 
+    // --- 剧集连播：双击一集 = 从这集开始连播本目录剩余（默认行为）
+    await cdp.eval(`loadBrowse(${JSON.stringify(album.id)}, '/剧集')`);
+    await cdp.waitFor('Array.from(document.querySelectorAll("#listing [data-path]")).some(function (n) { return n.getAttribute("title") === "穹庐下的魔女 第02集.mp4"; })', 15000, '进入剧集目录');
+    const ep2Point = await cdp.center(`Array.from(document.querySelectorAll('#listing [data-path]')).filter(function (n) { return n.getAttribute('title') === '穹庐下的魔女 第02集.mp4'; })[0]`);
+    await cdp.doubleClick(ep2Point.x, ep2Point.y);
+    await sleep(2500);
+    const seriesPlayer = (await httpJson(`http://127.0.0.1:${APP_PORT}/api/player`)).json.player;
+    const seriesPl = seriesPlayer.playlist || [];
+    check('双击一集 → 自动把本目录剩余集排进播放列表',
+      seriesPl.length === 2 && seriesPl[0].title === '穹庐下的魔女 第02集.mp4' && seriesPl[1].title === '穹庐下的魔女 第03集.mp4',
+      seriesPl.map((x) => x.title).join(' | '));
+    check('双击的那一集就是正在播的那一集', seriesPlayer.path === '/剧集/穹庐下的魔女 第02集.mp4', seriesPlayer.path);
+    await httpPost(`http://127.0.0.1:${APP_PORT}/api/player`, { action: 'stop' });
+    await sleep(500);
+
     // --- settings dialog: 点遮罩不应该关闭
     await cdp.eval('document.querySelector("#btn-settings").click()');
     await cdp.waitFor('!document.querySelector("#dlg-settings").classList.contains("hidden")');

@@ -320,8 +320,24 @@ async function buildState() {
 }
 
 // -------------------------------------------------------------- discovery ---
-async function discoverSubtitles(client, settings, filePath, fileName) {
-  const dir = filePath.replace(/[^/]*$/, '') || '/';
+// 列一次目录（含字幕子目录），供"一个文件"或"一整段剧集"复用 —— 连播时不给服务器添重复请求
+async function subtitleContext(client, settings, dirPath) {
+  const { entries } = await client.propfind(dirPath || '/', 1);
+  const wanted = (settings.subDirs || []).map((s) => s.toLowerCase());
+  const subLists = [];
+  for (const d of entries.filter((e) => e.isDir && wanted.includes(e.name.toLowerCase()))) {
+    try {
+      const sub = await client.propfind(d.path, 1);
+      subLists.push(sub.entries);
+    } catch {
+      /* a missing/unreadable subtitle folder must never block playback */
+    }
+  }
+  return { entries, subLists };
+}
+
+// 在已有目录清单里给某个文件挑字幕（纯计算，不联网）
+function subtitlesFor(context, settings, fileName) {
   const found = new Map();
 
   const add = (list, penalty) => {
@@ -332,41 +348,36 @@ async function discoverSubtitles(client, settings, filePath, fileName) {
       }
     }
   };
+  const allSubFiles = (list) => list
+    .filter((e) => !e.isDir && (settings.subExts || []).includes(media.extOf(e.name)))
+    .map((s) => ({ name: s.name, path: s.path, score: 40 }));
 
-  const { entries } = await client.propfind(dir, 1);
-  const named = media.findSubtitlesIn(entries, fileName, settings.subExts, settings.slang);
+  const named = media.findSubtitlesIn(context.entries, fileName, settings.subExts, settings.slang);
   add(named, 0);
 
   // 文件名规则没命中时，若这个目录里只有一个视频，目录里的字幕就归它
   if (!named.length && settings.subFallbackSingleVideo !== false) {
-    const fb = media.singleVideoFallback(entries, settings);
-    if (fb && fb.video.name === fileName) {
-      add(fb.subs.map((s) => ({ name: s.name, path: s.path, score: 40 })), 0);
-    }
+    const fb = media.singleVideoFallback(context.entries, settings);
+    if (fb && fb.video.name === fileName) add(allSubFiles(context.entries), 0);
   }
 
-  const wanted = (settings.subDirs || []).map((s) => s.toLowerCase());
-  const subdirs = entries.filter((e) => e.isDir && wanted.includes(e.name.toLowerCase()));
-  for (const d of subdirs) {
-    try {
-      const sub = await client.propfind(d.path, 1);
-      add(media.findSubtitlesIn(sub.entries, fileName, settings.subExts, settings.slang), 5);
-      if (!named.length && settings.subFallbackSingleVideo !== false) {
-        const fb = media.singleVideoFallback(entries, settings);
-        if (fb && fb.video.name === fileName) {
-          add(sub.entries
-            .filter((e) => !e.isDir && (settings.subExts || []).includes(media.extOf(e.name)))
-            .map((s) => ({ name: s.name, path: s.path, score: 40 })), 5);
-        }
-      }
-    } catch {
-      /* a missing/unreadable subtitle folder must never block playback */
+  for (const subEntries of context.subLists) {
+    add(media.findSubtitlesIn(subEntries, fileName, settings.subExts, settings.slang), 5);
+    if (!named.length && settings.subFallbackSingleVideo !== false) {
+      const fb = media.singleVideoFallback(context.entries, settings);
+      if (fb && fb.video.name === fileName) add(allSubFiles(subEntries), 5);
     }
   }
 
   return Array.from(found.values())
     .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name))
     .slice(0, 16);
+}
+
+// 单个文件的字幕（保持原有行为）
+async function discoverSubtitles(client, settings, filePath, fileName) {
+  const dir = filePath.replace(/[^/]*$/, '') || '/';
+  return subtitlesFor(await subtitleContext(client, settings, dir), settings, fileName);
 }
 
 // ------------------------------------------------------------ api handlers ---
@@ -434,10 +445,14 @@ async function handlePlay(body) {
   if (!media.isPlayable(kind)) throw Object.assign(new Error('该类型暂不支持播放：' + name), { status: 400 });
 
   const client = clientFor(album);
+  const wantSeries = body.mode === 'series';     // 从这一集开始，连播本目录剩余
   let subtitles = [];
-  if (body.loadSubs !== false) {
+  let context = null;
+  if (body.loadSubs !== false || wantSeries) {
     try {
-      subtitles = await discoverSubtitles(client, settings, rel, name);
+      const dir = rel.replace(/[^/]*$/, '') || '/';
+      context = await subtitleContext(client, settings, dir);   // 一次列目录，剧集里每集复用
+      subtitles = subtitlesFor(context, settings, name);
     } catch (err) {
       mpv.emit('log', { level: 'warn', message: '字幕扫描失败：' + err.message });
     }
@@ -468,11 +483,40 @@ async function handlePlay(body) {
   };
   if (forceStart != null) item.start = forceStart;
 
+  // 连播：同目录同类型、自然排序（第2集 在 第10集 前面），从这一集开始到目录末尾，
+  // 整段一次性交给 mpv —— 之后的"下一集"由 mpv 自己推进，我们不再同步队列。
+  let items = [item];
+  let series = null;
+  if (wantSeries && context) {
+    const list = media.buildSeries(context.entries, name, kind, settings);
+    if (list.length > 1) {
+      items = list.map((e) => {
+        const subs = body.loadSubs === false ? [] : subtitlesFor(context, settings, e.name);
+        const it = {
+          albumId: album.id,
+          path: e.path,
+          name: e.name,
+          title: e.name,
+          url: streamUrl(album.id, e.path),
+          subUrls: subs.map((s) => streamUrl(album.id, s.path)),
+          subNames: subs.map((s) => s.name),
+        };
+        if (e.name === name && forceStart != null) it.start = forceStart;
+        return it;
+      });
+      series = { total: items.length, from: name, to: items[items.length - 1].name };
+      mpv.emit('log', {
+        level: 'info',
+        message: `连播：从「${name}」开始，共 ${items.length} 集（到「${series.to}」）`,
+      });
+    }
+  }
+
   const mode = body.mode === 'append' ? 'append' : 'replace';
   if (entry) {
     mpv.emit('log', { level: 'info', message: `从上次位置继续：${watchlater.describe(entry, name)}` });
   }
-  const player = await mpv.play([item], { mode });
+  const player = await mpv.play(items, { mode });
 
   if (forceStart === 0) {
     // mpv 在"同文件重载"时会把旧位置又写回条目（实测），所以加载完之后再清一次，
@@ -487,6 +531,7 @@ async function handlePlay(body) {
     subtitles: item.subNames,
     resumed: entry ? entry.pos : null,
     resumedText: entry ? `${name} · ${watchlater.formatClock(entry.pos)}` : '',
+    series,
     player,
   };
 }

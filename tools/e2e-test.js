@@ -502,6 +502,21 @@ function readLog(file) {
         (stAppend.playlist || []).map((x) => x.title).join(' | '));
       await api('POST', '/api/player', { action: 'stop' });
       await sleep(400);
+
+      // 剧集连播（与传输方式无关）：从第 02 集开始 → 列表应是 [第02集, 第03集]
+      const sr = await api('POST', '/api/play', { albumId: album.id, path: ep2.path, mode: 'series', loadSubs: true });
+      const seriesInfo = sr.json && sr.json.series;
+      const seriesPl = (sr.json && sr.json.player && sr.json.player.playlist) || [];
+      check('连播：接口报告连播范围（第 02 集起共 2 集）',
+        !!seriesInfo && seriesInfo.total === 2 && seriesInfo.from === ep2.name, JSON.stringify(seriesInfo));
+      check('连播：播放列表 = [第02集, 第03集]（同目录剩余，自然排序）',
+        seriesPl.length === 2 && seriesPl[0].title === ep2.name && seriesPl[1].title === ep3.name,
+        seriesPl.map((x) => x.title).join(' | '));
+      check('连播：当前播的就是被点的那一集（不会先闪第 01 集）',
+        (await api('GET', '/api/player')).json.player.path === ep2.path,
+        (await api('GET', '/api/player')).json.player.path);
+      await api('POST', '/api/player', { action: 'stop' });
+      await sleep(400);
     }
 
     if (playing && playing.mode === 'ipc' && ep1 && ep2 && ep3) {
@@ -537,6 +552,22 @@ function readLog(file) {
       recEp = await getResume();
       check('连播时进度记在第 01 集上（不会串到追加项）', !!recEp && recEp.path === ep1.path,
         recEp ? `${recEp.path} pos=${recEp.pos}` : '没有进度');
+
+      // 2.5) 连播时的"每集各自挂字幕"：从第 02 集开始连播（第 02 集有字幕，第 03 集没有）
+      await api('POST', '/api/play', { albumId: album.id, path: ep2.path, mode: 'series', loadSubs: true });
+      await sleep(1200);
+      check('连播：第 02 集的字幕被挂上（每集各自挂各自的）',
+        (await api('GET', '/api/player')).json.player.subtitleCount === 1,
+        JSON.stringify((await api('GET', '/api/player')).json.player.subtitles));
+
+      // "下一集"由 mpv 自己推进：切到第 03 集后，字幕应当换成它自己的（没有字幕）
+      await api('POST', '/api/player', { action: 'next' });
+      await sleep(2000);
+      const afterNext = (await api('GET', '/api/player')).json.player;
+      check('连播：mpv 自己推进到第 03 集', afterNext.path === ep3.path, afterNext.path);
+      check('连播：第 03 集没有字幕（各集互不串）', afterNext.subtitleCount === 0,
+        String(afterNext.subtitleCount));
+      await stopPlaying();
 
       // 3) 切集时，上一个文件的进度也要被保存（实测 mpv 自己不会存，需要我们主动存）
       await playEpisode(ep1, 'replace');

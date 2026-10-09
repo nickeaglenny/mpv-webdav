@@ -99,7 +99,9 @@ New-Item -ItemType Directory -Force -Path $seriesDir | Out-Null
 foreach ($i in 1..3) {
     New-Video (Join-Path $seriesDir ('穹庐下的魔女 第{0:d2}集.mp4' -f $i)) 20 'testsrc2'
 }
-Write-Host '已准备剧集目录: 剧集\穹庐下的魔女 第01..03集.mp4（各 20 秒）'
+$srt = "1`r`n00:00:00,300 --> 00:00:05,000`r`n第二集的字幕（用于验证每集各自挂载字幕）。`r`n`r`n2`r`n00:00:05,200 --> 00:00:10,000`r`n第二集还在播。`r`n"
+[System.IO.File]::WriteAllText((Join-Path $seriesDir '穹庐下的魔女 第02集.chs.srt'), $srt, (New-Object System.Text.UTF8Encoding $false))
+Write-Host '已准备剧集目录: 剧集\穹庐下的魔女 第01..03集.mp4（各 20 秒）+ 第02集字幕'
 
 Write-Host ''
 Get-ChildItem -Recurse -File $root | ForEach-Object {

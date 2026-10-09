@@ -740,7 +740,7 @@ function enterEntry(entry) {
     loadBrowse(state.browse.albumId, entry.path);
     return;
   }
-  if (canPlay(entry)) { playEntry(entry, 'replace'); return; }
+  if (canPlay(entry)) { playEntry(entry, 'series'); return; }   /* 默认：从这集开始连播本目录剩余 */
   toast('info', '该类型暂不支持播放：' + (entry.name || '') + '（' + (KIND_LABEL[entry.kind] || entry.kind || '未知') + '）');
 }
 
@@ -802,8 +802,12 @@ function playEntry(entry, mode, opts) {
     if (res.resumed) {
       setStatus('已从上次位置继续播放：' + (res.resumedText || ''), 'ok');
       toast('success', '继续上次播放：' + (res.resumedText || ''), 4000);
-    } else if (mode !== 'replace' && res.player) {
+    } else if (mode === 'append') {
       setStatus('已追加到播放列表：' + (entry.name || ''), 'ok');
+    } else if (res.series && res.series.total > 1) {
+      var s = res.series;
+      setStatus('连播：' + s.from + ' 起共 ' + s.total + ' 集', 'ok');
+      toast('success', '开始连播：从「' + s.from + '」到「' + s.to + '」（共 ' + s.total + ' 集）', 4000);
     } else {
       setStatus('正在播放：' + (entry.name || ''), 'ok');
     }
@@ -841,7 +845,7 @@ function bindListing() {
     if (!found) return;
 
     if (act === 'enter') { ev.stopPropagation(); enterEntry(found.entry); return; }
-    if (act === 'play') { ev.stopPropagation(); blurSelf(actNode); playEntry(found.entry, 'replace'); return; }
+    if (act === 'play') { ev.stopPropagation(); blurSelf(actNode); playEntry(found.entry, 'series'); return; }
     if (act === 'menu') {
       ev.stopPropagation();
       var r = actNode.getBoundingClientRect();
@@ -879,9 +883,10 @@ function openEntryMenu(entry, x, y) {
   var items = [];
   if (canPlay(entry)) {
     var hasResume = isResumeFor(entry);
-    items.push({ label: '▶ 播放（替换当前）', run: function () { playEntry(entry, 'replace'); } });
+    items.push({ label: '▶ 从此集开始连播', run: function () { playEntry(entry, 'series'); } });
+    items.push({ label: '只播这一集', run: function () { playEntry(entry, 'single'); } });
     if (hasResume) {
-      items.push({ label: '↺ 从头播放', run: function () { playEntry(entry, 'replace', { resume: false }); } });
+      items.push({ label: '↺ 从头播放', run: function () { playEntry(entry, 'series', { resume: false }); } });
     }
     items.push({ label: '＋ 追加到播放列表', run: function () { playEntry(entry, 'append'); } });
     items.push({ sep: true });

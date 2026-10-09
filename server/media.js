@@ -130,7 +130,44 @@ function humanSize(bytes) {
   return (v >= 10 ? v.toFixed(0) : v.toFixed(1)) + ' ' + units[i];
 }
 
+// ---- 剧集连播：自然排序 + "从这一集开始"的播放列表 ------------------------
+// 自然排序：数字段按数值比，这样「第2集」会排在「第10集」前面，
+// 而普通字符串排序会得到 第10集 < 第2集 这种反直觉的结果。
+function naturalCompare(a, b) {
+  const ax = String(a).split(/(\d+)/);
+  const bx = String(b).split(/(\d+)/);
+  const len = Math.max(ax.length, bx.length);
+  for (let i = 0; i < len; i++) {
+    const as = ax[i] === undefined ? '' : ax[i];
+    const bs = bx[i] === undefined ? '' : bx[i];
+    if (as === bs) continue;
+    const an = /^\d+$/.test(as) ? Number(as) : null;
+    const bn = /^\d+$/.test(bs) ? Number(bs) : null;
+    if (an != null && bn != null) {
+      if (an !== bn) return an - bn;
+      continue;
+    }
+    const c = as.localeCompare(bs, 'zh');
+    if (c) return c;
+    return as < bs ? -1 : 1;      // localeCompare 认为相等时给个确定顺序
+  }
+  return 0;
+}
+
+// 连播列表：同目录 + 同类型（视频就都是视频）+ 自然排序，从当前这一集开始到目录末尾。
+// 返回 [{ name, path }, ...]；找不到当前文件时退化为"整个目录"。
+function buildSeries(entries, currentName, kind, settings = {}) {
+  const list = (Array.isArray(entries) ? entries : [])
+    .filter((e) => e && !e.isDir && kindOf(e.name, false, settings) === kind)
+    .slice()
+    .sort((x, y) => naturalCompare(x.name, y.name));
+  const idx = list.findIndex((e) => e.name === currentName);
+  const from = idx < 0 ? 0 : idx;
+  return list.slice(from).map((e) => ({ name: e.name, path: e.path }));
+}
+
 module.exports = {
   DEFAULT_VIDEO_EXTS, DEFAULT_AUDIO_EXTS, DEFAULT_IMAGE_EXTS, DEFAULT_SUB_EXTS, DEFAULT_SUB_DIRS,
   extOf, stripExt, kindOf, isPlayable, subtitleScore, findSubtitlesIn, singleVideoFallback, humanSize, langHint,
+  naturalCompare, buildSeries,
 };
