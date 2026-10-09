@@ -349,13 +349,34 @@ class Cdp {
     await cdp.waitFor('Array.from(document.querySelectorAll("#listing [data-path]")).some(function (n) { return n.getAttribute("title") === "测试影片.mkv"; })', 15000, '按钮进入文件夹');
     check('点「进入」按钮可进入文件夹', true);
 
-    // --- play the video from the UI
+    // --- 键盘上下选择：一次只移动一格（回归：曾被列表与全局两个处理器各处理一次 → 跳两格）
+    await cdp.eval('document.querySelector("#listing").focus()');
+    const sel0 = await cdp.eval('state.selIndex');
+    await cdp.pressKey('ArrowDown', 'ArrowDown', 40);
+    await sleep(250);
+    const sel1 = await cdp.eval('state.selIndex');
+    check('按一次 ↓ 只移动一格', sel1 === sel0 + 1, `selIndex ${sel0} → ${sel1}`);
+    await cdp.pressKey('ArrowDown', 'ArrowDown', 40);
+    await sleep(250);
+    const sel2 = await cdp.eval('state.selIndex');
+    check('再按一次 ↓ 仍然只移动一格', sel2 === sel1 + 1, `selIndex ${sel1} → ${sel2}`);
+    await cdp.pressKey('ArrowUp', 'ArrowUp', 38);
+    await sleep(250);
+    const sel3 = await cdp.eval('state.selIndex');
+    check('按一次 ↑ 也只移动一格', sel3 === sel2 - 1, `selIndex ${sel2} → ${sel3}`);
+    check('选中项确实高亮在界面上',
+      (await cdp.eval('document.querySelectorAll("#listing .row.is-selected").length')) === 1);
+
+    // --- 播放方式：双击行 / 回车即可播（行内不再有播放按钮）
     await cdp.eval(`(function () {
       var row = Array.from(document.querySelectorAll('#listing [data-path]'))
         .filter(function (n) { return n.getAttribute('title') === '测试影片.mkv'; })[0];
-      row.querySelector('[data-act="play"]').click();
-      return true;
-    })()`);
+      return !!row && !row.querySelector('[data-act="play"]');
+    })()`).then(function (noPlayBtn) {
+      check('视频行内不再有「播放」按钮', noPlayBtn === true, String(noPlayBtn));
+    });
+    const rowPoint = await cdp.center(`Array.from(document.querySelectorAll('#listing [data-path]')).filter(function (n) { return n.getAttribute('title') === '测试影片.mkv'; })[0]`);
+    await cdp.doubleClick(rowPoint.x, rowPoint.y);          // 真实双击开始播放
     // 界面上不再有播放控制面板：以「标签页标题出现进度」作为"已经开始播"的界面信号
     await cdp.waitFor('document.title.indexOf("测试影片") >= 0', 20000, '标签页标题出现影片名');
 
@@ -366,13 +387,16 @@ class Cdp {
     check('后端确认已挂载 3 条字幕', !!ps && ps.subtitleCount === 3, ps ? ps.subtitles.join(' | ') : '');
     check('mpv 实际挂载了 3 条字幕轨', !!ps && ps.subtitleTracks === 3, ps ? 'subtitleTracks=' + ps.subtitleTracks : '');
 
-    // --- 界面里不该再残留播放控制面板（已按需求整块删除）
+    // --- 界面里不该再残留播放面板 / 队列 / 播放按钮 / 继续观看 / 播放全部
     const leftover = await cdp.eval(`JSON.stringify({
       playerbar: !!document.querySelector('#playerbar, .playerbar'),
       playerbarButtons: document.querySelectorAll('#btn-toggle, #btn-stop, #btn-mute, #seek, #volume').length,
-      queuePane: !!document.querySelector('#queue-list, .pane-queue, #queue-toggle')
+      queuePane: !!document.querySelector('#queue-list, .pane-queue, #queue-toggle'),
+      rowPlayButtons: document.querySelectorAll('#listing [data-act="play"]').length,
+      topButtons: document.querySelectorAll('#btn-resume, #btn-play-all').length
     })`);
-    check('播放面板与队列面板已从界面移除', leftover === '{"playerbar":false,"playerbarButtons":0,"queuePane":false}', leftover);
+    check('播放面板/队列/播放按钮/继续/播放全部 都已从界面移除',
+      leftover === '{"playerbar":false,"playerbarButtons":0,"queuePane":false,"rowPlayButtons":0,"topButtons":0}', leftover);
 
     // --- 浏览器标签页标题显示播放进度（切到别的标签也能看到播到哪了）
     const tabTitle = await cdp.eval('document.title');
@@ -383,7 +407,7 @@ class Cdp {
     fs.writeFileSync(path.join(WORK, 'ui-playing.png'), Buffer.from(shot2.data, 'base64'));
     check('已保存播放界面截图', fs.existsSync(path.join(WORK, 'ui-playing.png')));
 
-    // --- 「继续观看」：播一集（20 秒的测试剧集）→ 停止（mpv 会存进度）→ 按钮应出现且能续播
+    // --- 进度仍由 mpv 记（播一集 → 停止 → /api/resume 能读到），网页这边只用于 ⋯ 菜单的「从头播放」
     await httpPost(`http://127.0.0.1:${APP_PORT}/api/play`,
       { albumId: album.id, path: '/剧集/穹庐下的魔女 第01集.mp4', mode: 'replace', loadSubs: false });
     await sleep(3000);
@@ -398,19 +422,14 @@ class Cdp {
     }
     check('停止后服务端能从 mpv 的进度里读到记录', !!rec, rec ? `${rec.name} pos=${rec.pos}` : '没等到记录');
     if (rec) {
-      await cdp.eval('refreshState()');     // 让页面把记录读回来
-      await cdp.waitFor('!document.querySelector("#btn-resume").classList.contains("hidden")', 10000, '继续观看按钮出现');
-      const chipText = await cdp.eval('document.querySelector("#btn-resume").textContent.trim()');
-      check('工具栏出现「继续观看」按钮', /继续/.test(chipText), chipText);
-      check('按钮上显示的不是 0:00', !/继续\s*0:00/.test(chipText), chipText);
-
-      const chipPoint = await cdp.center('document.querySelector("#btn-resume")');
-      await cdp.realClick(chipPoint.x, chipPoint.y);
-      await sleep(2000);
-      const p2 = await httpJson(`http://127.0.0.1:${APP_PORT}/api/player`);
-      const pos = p2.json && p2.json.player && p2.json.player.position;
-      check('点「继续观看」后从上次位置接着播', typeof pos === 'number' && pos >= rec.pos - 1.5,
-        `position=${pos} 期望≈${rec.pos}`);
+      await cdp.eval('refreshState()');     // 让页面把记录读回来（行内菜单据此显示「从头播放」）
+      await httpPost(`http://127.0.0.1:${APP_PORT}/api/play`,
+        { albumId: album.id, path: '/剧集/穹庐下的魔女 第01集.mp4', mode: 'replace', loadSubs: false });
+      await cdp.waitFor('document.title.indexOf("穹庐下的魔女") >= 0', 15000, '第二集开始播放');
+      await sleep(1800);        // mpv 应用 watch-later 的续播位置需要一点时间
+      const resumePos = (await httpJson(`http://127.0.0.1:${APP_PORT}/api/player`)).json.player.position;
+      check('再次播放同一文件时由 mpv 自动续播', resumePos >= rec.pos - 1.5,
+        `position=${resumePos} 期望≈${rec.pos}`);
 
       // 网页不再做播放遥控：焦点在列表上时按空格，不该影响 mpv 的播放
       await cdp.eval('document.querySelector("#listing").focus()');

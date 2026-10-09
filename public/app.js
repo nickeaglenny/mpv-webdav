@@ -286,13 +286,11 @@ function apiTestAlbum(payload) { return api('POST', API.albums + '/test', payloa
 function apiPlay(payload) { return api('POST', API.play, payload); }
 function apiSaveSettings(partial) { return api('PUT', API.settings, partial); }
 function apiGetResume() { return api('GET', API.resume); }
-function apiClearResume() { return api('DELETE', API.resume); }
 
 /** 重新读取「最近一次播放进度」（quiet=true 时不弹错误提示）。 */
 function refreshResume(quiet) {
   return apiGetResume().then(function (res) {
     state.resume = (res && res.resume) || null;
-    renderResume();
     renderListing();
     return state.resume;
   }).catch(function (err) {
@@ -595,7 +593,6 @@ function renderListing() {
     var kind = e.isDir ? 'dir' : (e.kind || 'other');
     var actions = '';
     if (e.isDir) actions += '<button class="row-act is-primary" data-act="enter" type="button" title="进入该目录">进入</button>';
-    if (canPlay(e)) actions += '<button class="row-act is-primary" data-act="play" type="button" title="立即播放">播放</button>';
     if (!e.isDir) actions += '<button class="row-act" data-act="menu" type="button" title="更多操作">⋯</button>';
     return '<div class="row' + (e.isDir ? ' is-dir' : '') + (i === state.selIndex ? ' is-selected' : '') + '"' +
       ' data-i="' + i + '" data-path="' + esc(e.path) + '" data-kind="' + esc(kind) + '" title="' + esc(e.name) + '">' +
@@ -663,13 +660,10 @@ function renderToolbar() {
   var l = $('#btn-view-list'), g = $('#btn-view-grid');
   if (l) l.classList.toggle('is-active', state.ui.view === 'list');
   if (g) g.classList.toggle('is-active', state.ui.view === 'grid');
-  var all = $('#btn-play-all');
-  if (all) all.disabled = !state.browse.albumId || state.browse.loading;
 }
 
 function renderBrowser() {
   renderToolbar();
-  renderResume();
   renderBreadcrumb();
   renderListing();
   if (state.browse.albumId && !state.browse.loading && !state.browse.error) {
@@ -774,53 +768,6 @@ function isResumeFor(entry) {
   return rec.albumId === state.browse.albumId && rec.path === entry.path;
 }
 
-/** 工具栏上的「继续观看」按钮：仅当记录属于当前专辑时显示。 */
-function renderResume() {
-  var btn = $('#btn-resume');
-  if (!btn) return;
-  var rec = state.resume;
-  var album = currentAlbum();
-  var show = !!(rec && rec.path && album && rec.albumId === album.id);
-  btn.classList.toggle('hidden', !show);
-  if (!show) return;
-  btn.textContent = '▶ 继续 ' + fmtClock(rec.pos);
-  btn.title = '上次看到 ' + fmtClock(rec.pos) + '（' + (rec.name || basename(rec.path)) + '）\n' +
-    rec.path + '\n想从头看：在该文件的行尾菜单里选「↺ 从头播放」';
-  btn.disabled = !state.browse.albumId || state.browse.loading;
-}
-
-function playResume() {
-  var entry = resumeEntry();
-  var rec = state.resume;
-  if (!entry || !rec) return;
-  var p = state.player || {};
-  /* 已经是当前这个文件：「继续观看」什么都不做，更不会重新加载。
-     （重载会让进度先归零、再由 mpv 续播，看起来像"跳了一下"；
-       要暂停/继续请直接在 mpv 窗口里操作） */
-  if (p.albumId === rec.albumId && p.path === rec.path && !p.idle) {
-    toast('info', '正在播放这个文件');
-    return;
-  }
-  if (state.browse.albumId !== rec.albumId) {
-    /* 记录属于另一个专辑：先切过去再播 */
-    state.selectedAlbumId = rec.albumId;
-    saveUiPrefs();
-    loadBrowse(rec.albumId, (rec.path.replace(/\/[^/]*$/, '') || '/'));
-  }
-  playEntry(entry, 'replace');
-}
-
-function clearResume(silent) {
-  return apiClearResume().then(function () {
-    state.resume = null;
-    renderResume();
-    renderListing();
-    if (!silent) toast('info', '已清除续播记录');
-  }).catch(function (err) {
-    if (!silent) toast('error', '清除失败：' + err.message);
-  });
-}
-
 /* ---------- 播放 ---------- */
 
 function playEntry(entry, mode, opts) {
@@ -853,47 +800,6 @@ function playEntry(entry, mode, opts) {
   }).catch(function (err) {
     toast('error', '播放失败：' + err.message);
     setStatus('播放失败：' + err.message, 'error');
-  });
-}
-
-/** 播放全部：第一个视频 replace，其余按当前排序 append。 */
-function playAll() {
-  var list = visibleEntries().filter(canPlay);
-  if (!list.length) { toast('info', '当前目录没有可播放的媒体文件'); return; }
-  var btn = $('#btn-play-all');
-  if (btn) { btn.disabled = true; btn.textContent = '▶ 播放中…'; }
-  setStatus('正在建立播放列表（' + list.length + ' 个文件）…');
-
-  var first = true, failed = 0, chain = Promise.resolve();
-  list.forEach(function (entry) {
-    chain = chain.then(function () {
-      return apiPlay({
-        albumId: state.browse.albumId,
-        path: entry.path,
-        mode: first ? 'replace' : 'append',
-        loadSubs: true
-      }).then(function (res) {
-        first = false;
-        if (res.player) applyPlayer(res.player);
-        if (Array.isArray(res.subtitles)) state.subCache[entry.path] = res.subtitles;
-      }).catch(function (err) {
-        failed++;
-        console.warn('播放全部：跳过一个文件', entry.path, err && err.message);
-      });
-    });
-  });
-
-  chain.then(function () {
-    if (btn) { btn.disabled = false; btn.textContent = '▶ 播放全部'; }
-    renderListing();
-    var okCount = list.length - failed;
-    if (okCount > 0) {
-      toast(failed ? 'info' : 'success', '已加入播放列表：' + okCount + ' 个文件' +
-        (failed ? '（' + failed + ' 个失败）' : ''));
-      setStatus('已加入播放列表：' + okCount + ' 个文件', 'ok');
-    } else {
-      toast('error', '播放全部失败：所有文件都无法播放');
-    }
   });
 }
 
@@ -948,24 +854,6 @@ function bindListing() {
     enterEntry(found.entry);
   });
 
-  box.addEventListener('keydown', function (ev) {
-    var list = visibleEntries();
-    if (!list.length) return;
-    if (ev.key === 'ArrowDown') {
-      ev.preventDefault();
-      state.selIndex = Math.min(list.length - 1, state.selIndex + 1);
-      renderListing();
-      scrollSelectionIntoView();
-    } else if (ev.key === 'ArrowUp') {
-      ev.preventDefault();
-      state.selIndex = Math.max(0, state.selIndex - 1);
-      renderListing();
-      scrollSelectionIntoView();
-    } else if (ev.key === 'Enter') {
-      ev.preventDefault();
-      if (state.selIndex >= 0 && state.selIndex < list.length) enterEntry(list[state.selIndex]);
-    }
-  });
 }
 
 function scrollSelectionIntoView() {
@@ -1040,18 +928,7 @@ function blurSelf(node) {
 function bindToolbar() {
   $('#btn-up').addEventListener('click', goUp);
   $('#btn-refresh').addEventListener('click', reloadBrowse);
-  $('#btn-play-all').addEventListener('click', function (ev) {
-    blurSelf(ev.currentTarget);
-    playAll();
-  });
-  var resumeBtn = $('#btn-resume');
-  if (resumeBtn) {
-    resumeBtn.addEventListener('click', function (ev) {
-      blurSelf(resumeBtn);
-      if (ev && ev.shiftKey) { clearResume(); return; }   /* Shift+点击 = 清除记录 */
-      playResume();
-    });
-  }
+
 
   var search = $('#search-input');
   search.addEventListener('input', function () {
@@ -1497,7 +1374,6 @@ function refreshState() {
     renderAlbums();
     renderHeader();
     renderToolbar();
-    renderResume();
 
     if (state.selectedAlbumId && state.browse.albumId !== state.selectedAlbumId) {
       var album = albumById(state.selectedAlbumId);
