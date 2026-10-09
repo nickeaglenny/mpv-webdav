@@ -14,6 +14,14 @@ const net = require('net');
 const { getFreePort } = require('./cdp-client');
 
 const ROOT = path.join(__dirname, '..');
+// 测试素材是生成的、不进仓库：缺了就直接说清楚怎么生成，别让它变成一堆莫名其妙的失败
+const TESTDATA_DIR = path.join(__dirname, 'testdata');
+if (!fs.existsSync(path.join(TESTDATA_DIR, '电影', '测试影片.mkv'))) {
+  console.error('缺少测试素材，请先运行：');
+  console.error('  powershell -NoProfile -ExecutionPolicy Bypass -File tools\\make-testdata.ps1');
+  console.error('（或 npm run testdata）');
+  process.exit(1);
+}
 const WORK = path.join(__dirname, '.ui');
 // 端口全部动态分配：绝不能抢用户正在使用的 8787，
 // 否则测试请求会落到用户的实例上，把他的专辑/设置改掉。

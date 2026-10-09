@@ -303,7 +303,7 @@ node tools\live-check.js --url https://nas.example.com:5006/dav --user <用户�
 ::   --headless 默认开：mpv 用 --vo=null --ao=null，不弹窗不出声；加 --no-headless 可看真实播放
 ```
 
-`tools/testdata` 里是自动生成的 3 段小视频和 3 个外挂字幕（含中文名与 `subs/` 子目录场景）。
+`tools/testdata` 里是自动生成的测试素材（小视频 + 中文字幕，含中文名与 `subs/` 子目录场景）。**整个目录都是生成的、不进仓库**，跑 `e2e` / UI 测试前先执行一次 `npm run testdata`（缺素材时测试会直接提示这一句）。
 
 > 所有测试脚本都会**动态分配端口**，并在启动后断言"连到的是本次测试自己的实例"（端口一致、专辑列表符合预期），
 > 否则立即中止、不做任何修改——因此不会占用你正在使用的 `8787`，也不会写你的 `data/`（`ui-live` 只读取 `data/` 的副本）。

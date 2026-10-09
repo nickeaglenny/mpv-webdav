@@ -1,1 +1,0 @@
-这是 mpv-webdav 的本地测试数据，用 tools/mock-webdav.js 提供 WebDAV 服务。

@@ -25,9 +25,9 @@ tools/.shot/
 tools/.rendercheck/
 tools/.storetest/
 
-# 生成的测试样片（可用 npm run testdata 重新生成）
-tools/testdata/**/*.mkv
-tools/testdata/**/*.mp4
+# 测试素材整个目录都是生成的（npm run testdata 一键重建），不进仓库
+# —— 生成的样片、以及配套的 .srt/.ass/.txt 小文件都在里面
+tools/testdata/
 
 # 常规
 node_modules/
