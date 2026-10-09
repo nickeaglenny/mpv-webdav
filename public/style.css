@@ -202,8 +202,7 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; colo
 }
 
 .pane { display: flex; flex-direction: column; min-height: 0; }
-.pane-albums { flex: 1 1 55%; border-bottom: 1px solid var(--line); }
-.pane-queue { flex: 1 1 45%; }
+.pane-albums { flex: 1 1 auto; }
 
 .pane-head {
   flex: 0 0 auto;
@@ -222,16 +221,6 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; colo
 .pane-body { flex: 1 1 auto; overflow-y: auto; overflow-x: hidden; padding: 5px; min-height: 0; }
 .pane-hint { padding: 12px 10px; color: var(--text-mute); font-size: 12px; }
 
-.queue-actions {
-  flex: 0 0 auto;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 5px;
-  padding: 7px;
-  border-top: 1px solid var(--line-soft);
-  background: #1d222a;
-}
-.queue-actions .btn { width: 100%; }
 
 /* 专辑条目 */
 .album-item {
@@ -302,23 +291,6 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; colo
 .album-actions .btn { height: 18px; padding: 0 6px; font-size: 10.5px; line-height: 1; }
 
 /* 播放列表条目 */
-.queue-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
-  border-radius: var(--radius);
-  cursor: default;
-  border: 1px solid transparent;
-}
-.queue-item:hover { background: var(--bg-3); }
-.queue-item.is-playing { background: var(--accent-soft); border-color: rgba(62, 166, 255, .5); }
-.queue-item.is-playing .queue-title { color: var(--accent); font-weight: 600; }
-.queue-idx { flex: 0 0 22px; text-align: right; color: var(--text-mute); font-size: 11px; font-variant-numeric: tabular-nums; }
-.queue-main { min-width: 0; flex: 1 1 auto; }
-.queue-title { display: block; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.queue-path { display: block; font-size: 11px; color: var(--text-mute); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; direction: rtl; text-align: left; }
-.queue-eq { flex: 0 0 auto; color: var(--accent); font-size: 11px; }
 
 /* ---------- 5. 主内容区 ---------- */
 .main {
@@ -573,76 +545,12 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; colo
 .ctx-item.is-danger:hover { background: rgba(255, 107, 107, .16); color: var(--err); }
 .ctx-sep { height: 1px; margin: 4px 2px; background: var(--line); }
 
-/* ---------- 7. 播放器条 ---------- */
-.playerbar {
-  flex: 0 0 auto;
-  height: var(--player-h);
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  padding: 0 14px;
-  background: linear-gradient(180deg, #1d222a 0%, #171b21 100%);
-  border-top: 1px solid var(--line);
-}
-.np-info { flex: 0 1 320px; min-width: 0; }
-.np-title {
-  font-size: 13px;
-  font-weight: 600;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.np-title.is-idle { color: var(--text-mute); font-weight: 400; }
-.np-title.is-error { color: var(--err); }
-.np-path {
-  font-size: 11px;
-  color: var(--text-mute);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  font-family: var(--mono);
-}
-.np-controls { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
-.np-controls .btn-icon { width: 34px; height: 34px; font-size: 15px; }
-
-.np-seek { flex: 1 1 auto; display: flex; align-items: center; gap: 9px; min-width: 140px; }
-.np-extra { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; }
-.subs-ind {
-  font-size: 11px;
-  color: var(--text-dim);
-  padding: 2px 8px;
-  border-radius: 9px;
-  background: var(--bg-2);
-  border: 1px solid var(--line);
-  white-space: nowrap;
-}
-.subs-ind.is-on { color: #c58cff; border-color: rgba(197, 140, 255, .45); background: rgba(197, 140, 255, .12); }
-.time {
-  font-size: 12px;
-  color: var(--text-dim);
-  font-variant-numeric: tabular-nums;
-  font-family: var(--mono);
-  flex: 0 0 auto;
-}
-.time-sep { color: var(--text-mute); font-size: 11px; flex: 0 0 auto; }
 
 /* 滑块 */
-.range {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 100%;
-  height: 18px;
-  background: transparent;
-  cursor: pointer;
-  outline: none;
-  min-width: 0;
-}
-.range::-webkit-slider-runnable-track {
   height: 4px;
   border-radius: 2px;
   background: #39414c;
 }
-.range::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
   width: 13px; height: 13px;
@@ -652,12 +560,8 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; colo
   border: 2px solid #10151b;
   box-shadow: 0 0 0 1px var(--accent);
 }
-.range:disabled { cursor: not-allowed; opacity: .5; }
-.range:disabled::-webkit-slider-thumb { background: var(--text-mute); box-shadow: none; }
-.range-vol { width: 90px; flex: 0 0 90px; }
-.range-vol::-webkit-slider-runnable-track { height: 3px; }
 
-/* ---------- 8. 状态栏 ---------- */
+/* ---------- 7. 状态栏 ---------- */
 .statusbar {
   flex: 0 0 auto;
   height: var(--status-h);
@@ -677,7 +581,7 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; colo
 .status-left.is-ok { color: var(--ok); }
 .status-right { flex: 0 0 auto; white-space: nowrap; }
 
-/* ---------- 9. 对话框 ---------- */
+/* ---------- 8. 对话框 ---------- */
 .modal { position: fixed; inset: 0; z-index: 80; display: flex; align-items: center; justify-content: center; }
 .modal-mask { position: absolute; inset: 0; background: rgba(8, 10, 13, .66); }
 .modal-box {
@@ -750,7 +654,7 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; colo
 .test-result.is-bad { color: var(--err); background: rgba(255, 107, 107, .1); border-color: rgba(255, 107, 107, .4); }
 .test-result.is-busy { color: var(--text-dim); background: var(--bg-2); border-color: var(--line); }
 
-/* ---------- 10. 提示条 ---------- */
+/* ---------- 9. 提示条 ---------- */
 .toasts {
   position: fixed;
   top: 58px;
@@ -790,7 +694,7 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; colo
 .toast-error { border-left-color: var(--err); }
 .toast-error .toast-icon { color: var(--err); }
 
-/* ---------- 11. 启动错误整页卡片 ---------- */
+/* ---------- 10. 启动错误整页卡片 ---------- */
 .boot-error {
   position: fixed;
   inset: 0;
@@ -817,7 +721,7 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; colo
 .boot-error-title { margin: 0; font-size: 16px; }
 .boot-error-msg { margin: 0; font-size: 12.5px; color: var(--text-dim); word-break: break-all; }
 
-/* ---------- 12. 窄屏适配（>=1024px 可用） ---------- */
+/* ---------- 11. 窄屏适配（>=1024px 可用） ---------- */
 @media (max-width: 1400px) {
   .list-head, .row { grid-template-columns: minmax(0, 1fr) 86px 132px 70px 150px; }
 }
@@ -825,12 +729,9 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; colo
   :root { --sidebar-w: 244px; }
   .list-head, .row { grid-template-columns: minmax(0, 1fr) 78px 118px 62px 132px; }
   .input-search { flex-basis: 170px; }
-  .np-info { flex-basis: 200px; }
 }
 @media (max-width: 1060px) {
   .col-mtime { display: none; }
   .list-head, .row { grid-template-columns: minmax(0, 1fr) 78px 62px 132px; }
   .list-head .col-mtime { display: none; }
-  .np-extra .time { display: none; }
-  .range-vol { width: 64px; flex-basis: 64px; }
 }

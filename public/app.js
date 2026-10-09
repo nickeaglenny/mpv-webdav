@@ -28,7 +28,6 @@ var API = {
 var STORAGE_KEY  = 'mpvwebdav.ui';
 var TOAST_MS     = 3500;
 var POLL_MS      = 2000;
-var SEEK_STEP    = 0.5;
 
 /* 图标（内联 SVG，使用 currentColor 着色） */
 var ICONS = {
@@ -68,10 +67,6 @@ var state = {
   selIndex: -1,
   subCache: {},              /* path -> [字幕文件名] */
   resume: null,              /* 最近一次播放进度（只记一条） */
-  draggingSeek: false,
-  seekPreview: 0,
-  draggingVol: false,
-  volPreview: 0,
   sse: null,
   sseOpen: false,
   polling: false,
@@ -139,15 +134,6 @@ function fmtSize(n) {
   return (v >= 100 ? v.toFixed(0) : v.toFixed(1)) + ' ' + units[i];
 }
 
-function fmtTime(sec) {
-  var s = Number(sec);
-  if (!isFinite(s) || s < 0) s = 0;
-  s = Math.floor(s);
-  var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
-  function p(x) { return (x < 10 ? '0' : '') + x; }
-  return h > 0 ? (h + ':' + p(m) + ':' + p(ss)) : (p(m) + ':' + p(ss));
-}
-
 function fmtDate(iso) {
   if (!iso) return '—';
   var d = new Date(iso);
@@ -168,12 +154,6 @@ function middleEllipsize(text, maxChars) {
 }
 
 /** 按容器像素宽度估算可显示字符数并做中间省略。 */
-function fitMiddleEllipsize(node, text) {
-  if (!node) return;
-  var w = node.clientWidth || 360;
-  var maxChars = Math.max(12, Math.floor(w / 6.6));
-  node.textContent = middleEllipsize(text, maxChars);
-}
 
 function basename(p) {
   if (!p) return '';
@@ -505,65 +485,7 @@ function albumPayload(album, includePassword) {
   return base;
 }
 
-/* ============================ 7. 播放列表侧边栏 ============================ */
-
-function renderPlaylist() {
-  var box = $('#queue-list');
-  if (!box) return;
-  var p = state.player;
-  var list = (p && Array.isArray(p.playlist)) ? p.playlist : [];
-
-  var countNode = $('#queue-count');
-  if (countNode) countNode.textContent = String(list.length);
-
-  box.innerHTML = '';
-  if (!list.length) {
-    box.appendChild(el('div', { class: 'pane-hint', text: '播放列表为空。在目录中双击视频即可播放。' }));
-  } else {
-    list.forEach(function (it, i) {
-      var playing = !!it.playing;
-      box.appendChild(el('div', {
-        class: 'queue-item' + (playing ? ' is-playing' : ''),
-        title: String(it.path || ''),
-        dataset: { index: String(i), path: String(it.path || '') }
-      }, [
-        el('span', { class: 'queue-idx', text: String(typeof it.index === 'number' ? it.index + 1 : i + 1) }),
-        el('span', { class: 'queue-main' }, [
-          el('span', { class: 'queue-title', text: it.title || basename(it.path) || '(未命名)' }),
-          el('span', { class: 'queue-path', text: it.path || '' })
-        ]),
-        playing ? el('span', { class: 'queue-eq', text: '♪' }) : null
-      ]));
-    });
-  }
-
-  var active = isPlayerActive();
-  var toggleBtn = $('#queue-toggle');
-  if (toggleBtn) toggleBtn.textContent = (active && !p.paused) ? '⏸ 暂停' : '▶ 播放';
-  ['#queue-prev', '#queue-toggle', '#queue-stop', '#queue-next'].forEach(function (sel) {
-    var b = $(sel);
-    if (b) b.disabled = !active;
-  });
-}
-
-function bindQueue() {
-  var map = { '#queue-prev': 'prev', '#queue-toggle': 'toggle', '#queue-stop': 'stop', '#queue-next': 'next' };
-  Object.keys(map).forEach(function (sel) {
-    var btn = $(sel);
-    if (btn) btn.addEventListener('click', function (ev) { blurSelf(ev.currentTarget); sendPlayerAction(map[sel]); });
-  });
-  var list = $('#queue-list');
-  if (list) {
-    /* 播放列表条目：单击选中（不高亮），双击无特殊行为 —— 仅按需求保持静默。 */
-    list.addEventListener('click', function (ev) {
-      var item = ev.target.closest ? ev.target.closest('.queue-item') : null;
-      if (!item) return;
-      setStatus('列表项：' + (item.dataset.path || ''));
-    });
-  }
-}
-
-/* ============================ 8. 目录浏览区 ============================ */
+/* ============================ 7. 目录浏览区 ============================ */
 
 function visibleEntries() {
   var q = state.search.trim().toLowerCase();
@@ -1164,7 +1086,7 @@ function setView(view) {
   renderListing();
 }
 
-/* ============================ 9. 播放器条 ============================ */
+/* ============================ 8. 播放器状态（仅用于标签页标题） ============================ */
 
 function emptyPlayer() {
   return {
@@ -1186,80 +1108,13 @@ function applyPlayer(ps) {
   if (ps.running === undefined && ps.player && typeof ps.player === 'object') ps = ps.player;
   var wasActive = isPlayerActive();
   state.player = ps;
-  renderPlayer();
-  renderPlaylist();
-  /* 播放结束/停止时，mpv 需要一点时间把进度写进 watch-later：
-     稍等片刻再拉一次「继续观看」，按钮才会及时出现 */
+  /* 界面上不再有播放控制（播放/暂停/进度都在 mpv 里），这里只做两件事：
+     ① 标签页标题显示进度 ② 播放结束后稍等片刻再拉一次「继续观看」 */
+  renderTabTitle();
   if (wasActive && !isPlayerActive()) {
     window.setTimeout(function () { refreshResume(true); }, 1200);
   }
   if (ps.error) setStatus('播放器错误：' + ps.error, 'error');
-}
-
-function renderPlayer() {
-  var p = state.player || emptyPlayer();
-  var active = isPlayerActive();
-
-  var titleNode = $('#np-title');
-  var title = p.mediaTitle || (p.path ? basename(p.path) : '') || '未播放';
-  titleNode.textContent = p.error ? ('播放错误：' + p.error) : title;
-  titleNode.className = 'np-title' + (!active && !p.error ? ' is-idle' : '') + (p.error ? ' is-error' : '');
-
-  var pathNode = $('#np-path');
-  pathNode.title = p.path || '';
-  fitMiddleEllipsize(pathNode, p.path || (active ? '' : '—'));
-
-  /* 进度：拖动时不让 SSE 抢走滑块 */
-  var seek = $('#seek');
-  var dur = Number(p.duration) || 0;
-  var pos = Number(p.position) || 0;
-  seek.max = String(dur > 0 ? dur : 1000);
-  seek.step = String(SEEK_STEP);
-  if (state.draggingSeek) {
-    setText($('#np-pos'), fmtTime(state.seekPreview));
-  } else {
-    seek.value = String(Math.min(pos, dur > 0 ? dur : pos));
-    setText($('#np-pos'), fmtTime(pos));
-  }
-  setText($('#np-dur'), fmtTime(dur));
-
-  /* 音量 */
-  var vol = $('#volume');
-  var v = Number(p.volume);
-  if (!isFinite(v)) v = 100;
-  if (state.draggingVol) {
-    setText($('#np-vol'), String(Math.round(state.volPreview)));
-  } else {
-    vol.value = String(Math.max(0, Math.min(100, Math.round(v))));
-    setText($('#np-vol'), String(Math.max(0, Math.min(100, Math.round(v)))));
-  }
-
-  var muteBtn = $('#btn-mute');
-  muteBtn.textContent = p.mute ? '🔇' : '🔊';
-  muteBtn.title = p.mute ? '取消静音' : '静音';
-
-  var subs = Number(p.subtitleCount);
-  if (!isFinite(subs)) subs = Array.isArray(p.subtitles) ? p.subtitles.length : 0;
-  var subsNode = $('#np-subs');
-  subsNode.textContent = '字幕 ' + subs;
-  subsNode.classList.toggle('is-on', subs > 0);
-  subsNode.title = (Array.isArray(p.subtitles) && p.subtitles.length)
-    ? ('已加载字幕：\n' + p.subtitles.map(basename).join('\n'))
-    : '已加载字幕数量';
-
-  ['#seek', '#volume', '#btn-mute', '#btn-stop', '#btn-toggle'].forEach(function (sel) {
-    var n = $(sel);
-    if (n) n.disabled = !active;
-  });
-
-  var toggleBtn = $('#btn-toggle');
-  toggleBtn.textContent = p.paused ? '▶' : '❚❚';
-  toggleBtn.title = p.paused ? '继续播放' : '暂停';
-
-  var qToggle = $('#queue-toggle');
-  if (qToggle) qToggle.textContent = (active && !p.paused) ? '⏸ 暂停' : '▶ 播放';
-
-  renderTabTitle();
 }
 
 /** 浏览器标签页标题显示播放进度：切到别的标签也能看到播到哪了。 */
@@ -1291,67 +1146,8 @@ function sendPlayerAction(action, value) {
   });
 }
 
-function bindPlayerBar() {
-  $('#btn-stop').addEventListener('click', function (ev) { blurSelf(ev.currentTarget); sendPlayerAction('stop'); });
-  $('#btn-toggle').addEventListener('click', function (ev) { blurSelf(ev.currentTarget); sendPlayerAction('toggle'); });
-  $('#btn-mute').addEventListener('click', function () {
-    var p = state.player || emptyPlayer();
-    sendPlayerAction('mute', p.mute ? 0 : 1);
-  });
 
-  var seek = $('#seek');
-  function beginSeek() {
-    if (!isPlayerActive()) return;
-    state.draggingSeek = true;
-    state.seekPreview = Number(seek.value) || 0;
-  }
-  seek.addEventListener('pointerdown', beginSeek);
-  seek.addEventListener('keydown', beginSeek);
-  seek.addEventListener('input', function () {
-    if (!state.draggingSeek) state.draggingSeek = true;
-    state.seekPreview = Number(seek.value) || 0;
-    setText($('#np-pos'), fmtTime(state.seekPreview));
-  });
-  function commitSeek() {
-    if (!state.draggingSeek) return;
-    state.draggingSeek = false;
-    var target = Number(seek.value) || 0;
-    sendPlayerAction('seek', target).then(function () {
-      setText($('#np-pos'), fmtTime(target));
-    });
-  }
-  seek.addEventListener('change', commitSeek);
-  seek.addEventListener('pointerup', commitSeek);
-  seek.addEventListener('blur', commitSeek);
-
-  var vol = $('#volume');
-  vol.addEventListener('pointerdown', function () {
-    if (!isPlayerActive()) return;
-    state.draggingVol = true;
-    state.volPreview = Number(vol.value) || 0;
-  });
-  vol.addEventListener('input', function () {
-    state.draggingVol = true;
-    state.volPreview = Number(vol.value) || 0;
-    setText($('#np-vol'), String(Math.round(state.volPreview)));
-  });
-  function commitVol() {
-    if (!state.draggingVol) return;
-    state.draggingVol = false;
-    var target = Math.round(Number(vol.value) || 0);
-    sendPlayerAction('volume', target);
-  }
-  vol.addEventListener('change', commitVol);
-  vol.addEventListener('pointerup', commitVol);
-
-  var npPath = $('#np-path');
-  window.addEventListener('resize', function () {
-    var p = state.player;
-    fitMiddleEllipsize(npPath, (p && p.path) ? p.path : '');
-  });
-}
-
-/* ============================ 10. SSE 与轮询 ============================ */
+/* ============================ 9. SSE 与轮询 ============================ */
 
 function startEvents() {
   if (state.sse || state.polling) return;          /* 幂等：重复调用不重建连接 */
@@ -1425,7 +1221,7 @@ function pollOnce() {
   });
 }
 
-/* ============================ 11. 专辑对话框 ============================ */
+/* ============================ 10. 专辑对话框 ============================ */
 
 var albumDialogMode = 'create';   /* 'create' | 'edit' */
 var albumDialogId = null;
@@ -1576,7 +1372,7 @@ function bindAlbumDialog() {
   });
 }
 
-/* ============================ 12. 设置对话框 ============================ */
+/* ============================ 11. 设置对话框 ============================ */
 
 function openSettingsDialog() {
   var st = state.settings || (state.app && state.app.settings) || {};
@@ -1668,7 +1464,7 @@ function bindSettingsDialog() {
   }
 }
 
-/* ============================ 13. 顶部状态 / 全局刷新 ============================ */
+/* ============================ 12. 顶部状态 / 全局刷新 ============================ */
 
 function renderHeader() {
   var app = state.app || {};
@@ -1733,7 +1529,7 @@ function showBootError(message) {
   $('#app').classList.add('hidden');
 }
 
-/* ============================ 14. 键盘快捷键 ============================ */
+/* ============================ 13. 键盘快捷键 ============================ */
 
 function bindKeyboard() {
   document.addEventListener('keydown', function (ev) {
@@ -1775,11 +1571,6 @@ function bindKeyboard() {
       return;
     }
 
-    if (ev.key === ' ' || ev.code === 'Space') {
-      if (isPlayerActive()) { ev.preventDefault(); sendPlayerAction('toggle'); }
-      return;
-    }
-
     if (ev.key === 'Enter') {
       var list = visibleEntries();
       if (state.selIndex >= 0 && state.selIndex < list.length) {
@@ -1808,21 +1599,18 @@ function bindKeyboard() {
   window.addEventListener('blur', closeCtxMenu);
 }
 
-/* ============================ 15. 启动引导 ============================ */
+/* ============================ 14. 启动引导 ============================ */
 
 function boot() {
   loadUiPrefs();
   renderToolbar();
   renderListing();
-  renderPlayer();
-  renderPlaylist();
+  renderTabTitle();
   renderHeader();
 
   bindToolbar();
   bindAlbumList();
-  bindQueue();
   bindListing();
-  bindPlayerBar();
   bindAlbumDialog();
   bindSettingsDialog();
   bindKeyboard();

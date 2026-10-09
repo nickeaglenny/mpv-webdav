@@ -44,22 +44,6 @@
         </div>
       </section>
 
-      <!-- 播放列表 -->
-      <section class="pane pane-queue">
-        <div class="pane-head">
-          <h2 class="pane-title">播放列表 <span class="count" id="queue-count">0</span></h2>
-        </div>
-        <div class="pane-body" id="queue-list">
-          <div class="pane-hint">暂无播放列表</div>
-        </div>
-        <div class="queue-actions">
-          <button class="btn btn-sm" id="queue-prev" type="button" title="上一首">⏮ 上一首</button>
-          <button class="btn btn-sm" id="queue-toggle" type="button" title="播放 / 暂停">▶ 播放</button>
-          <button class="btn btn-sm" id="queue-stop" type="button" title="停止">⏹ 停止</button>
-          <button class="btn btn-sm" id="queue-next" type="button" title="下一首">⏭ 下一首</button>
-        </div>
-      </section>
-
     </aside>
 
     <!-- 主内容区 -->
@@ -95,30 +79,6 @@
 
     </main>
   </div>
-
-  <!-- 播放器条 -->
-  <footer class="playerbar" id="playerbar">
-    <div class="np-info">
-      <div class="np-title" id="np-title">未播放</div>
-      <div class="np-path" id="np-path" title=""></div>
-    </div>
-    <div class="np-controls">
-      <button class="btn btn-icon" id="btn-stop" type="button" title="停止" disabled>⏹</button>
-      <button class="btn btn-icon" id="btn-toggle" type="button" title="暂停 / 继续" disabled>▶</button>
-    </div>
-    <div class="np-seek">
-      <input class="range" id="seek" type="range" min="0" max="1000" step="1" value="0" disabled aria-label="播放进度">
-      <span class="time" id="np-pos">00:00</span>
-      <span class="time-sep">/</span>
-      <span class="time" id="np-dur">00:00</span>
-    </div>
-    <div class="np-extra">
-      <span class="subs-ind" id="np-subs" title="已加载字幕数量">字幕 0</span>
-      <button class="btn btn-icon" id="btn-mute" type="button" title="静音切换" disabled>🔊</button>
-      <input class="range range-vol" id="volume" type="range" min="0" max="100" step="1" value="100" disabled aria-label="音量">
-      <span class="time" id="np-vol">100</span>
-    </div>
-  </footer>
 
   <!-- 底部状态栏 -->
   <div class="statusbar">

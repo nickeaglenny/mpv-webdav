@@ -356,11 +356,8 @@ class Cdp {
       row.querySelector('[data-act="play"]').click();
       return true;
     })()`);
-    await cdp.waitFor('document.querySelector("#np-title").textContent.indexOf("测试影片") >= 0', 20000, '播放器条更新');
-    const npTitle = await cdp.eval('document.querySelector("#np-title").textContent.trim()');
-    const npSubs = await cdp.eval('document.querySelector("#np-subs").textContent.trim()');
-    check('播放器条显示当前影片', /测试影片\.mkv/.test(npTitle), npTitle);
-    check('播放器条显示字幕数量 3', /3/.test(npSubs), npSubs);
+    // 界面上不再有播放控制面板：以「标签页标题出现进度」作为"已经开始播"的界面信号
+    await cdp.waitFor('document.title.indexOf("测试影片") >= 0', 20000, '标签页标题出现影片名');
 
     await sleep(2500);
     const player = await httpJson(`http://127.0.0.1:${APP_PORT}/api/player`);
@@ -368,7 +365,14 @@ class Cdp {
     check('后端确认正在播放', !!ps && ps.running === true, ps ? `mode=${ps.mode} pos=${ps.position}` : '');
     check('后端确认已挂载 3 条字幕', !!ps && ps.subtitleCount === 3, ps ? ps.subtitles.join(' | ') : '');
     check('mpv 实际挂载了 3 条字幕轨', !!ps && ps.subtitleTracks === 3, ps ? 'subtitleTracks=' + ps.subtitleTracks : '');
-    check('播放列表已同步到界面', (await cdp.eval('document.querySelectorAll("#queue-list [data-path], #queue-list .queue-item, #queue-list li, #queue-list div").length')) > 0);
+
+    // --- 界面里不该再残留播放控制面板（已按需求整块删除）
+    const leftover = await cdp.eval(`JSON.stringify({
+      playerbar: !!document.querySelector('#playerbar, .playerbar'),
+      playerbarButtons: document.querySelectorAll('#btn-toggle, #btn-stop, #btn-mute, #seek, #volume').length,
+      queuePane: !!document.querySelector('#queue-list, .pane-queue, #queue-toggle')
+    })`);
+    check('播放面板与队列面板已从界面移除', leftover === '{"playerbar":false,"playerbarButtons":0,"queuePane":false}', leftover);
 
     // --- 浏览器标签页标题显示播放进度（切到别的标签也能看到播到哪了）
     const tabTitle = await cdp.eval('document.title');
