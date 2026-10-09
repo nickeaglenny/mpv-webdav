@@ -550,7 +550,7 @@ function bindQueue() {
   var map = { '#queue-prev': 'prev', '#queue-toggle': 'toggle', '#queue-stop': 'stop', '#queue-next': 'next' };
   Object.keys(map).forEach(function (sel) {
     var btn = $(sel);
-    if (btn) btn.addEventListener('click', function () { sendPlayerAction(map[sel]); });
+    if (btn) btn.addEventListener('click', function (ev) { blurSelf(ev.currentTarget); sendPlayerAction(map[sel]); });
   });
   var list = $('#queue-list');
   if (list) {
@@ -872,6 +872,14 @@ function playResume() {
   var entry = resumeEntry();
   var rec = state.resume;
   if (!entry || !rec) return;
+  var p = state.player || {};
+  /* 已经是当前这个文件（暂停中或正在播）：「继续观看」只负责让它继续播，
+     不要重新加载文件——重载会让进度先归零、再由 mpv 续播，看起来像"跳了一下" */
+  if (p.albumId === rec.albumId && p.path === rec.path && !p.idle) {
+    if (p.paused) sendPlayerAction('toggle');
+    else toast('info', '正在播放这个文件');
+    return;
+  }
   if (state.browse.albumId !== rec.albumId) {
     /* 记录属于另一个专辑：先切过去再播 */
     state.selectedAlbumId = rec.albumId;
@@ -992,7 +1000,7 @@ function bindListing() {
     if (!found) return;
 
     if (act === 'enter') { ev.stopPropagation(); enterEntry(found.entry); return; }
-    if (act === 'play') { ev.stopPropagation(); playEntry(found.entry, 'replace'); return; }
+    if (act === 'play') { ev.stopPropagation(); blurSelf(actNode); playEntry(found.entry, 'replace'); return; }
     if (act === 'menu') {
       ev.stopPropagation();
       var r = actNode.getBoundingClientRect();
@@ -1102,13 +1110,23 @@ function showCtxMenu(x, y, items) {
 
 /* ---------- 工具栏事件 ---------- */
 
+/* 播放类按钮点完就取消焦点：避免空格/回车"又点了一次"
+   （典型症状：鼠标点过「继续观看/播放全部」后按空格想暂停，却把这一集重新加载了） */
+function blurSelf(node) {
+  if (node && typeof node.blur === 'function') node.blur();
+}
+
 function bindToolbar() {
   $('#btn-up').addEventListener('click', goUp);
   $('#btn-refresh').addEventListener('click', reloadBrowse);
-  $('#btn-play-all').addEventListener('click', playAll);
+  $('#btn-play-all').addEventListener('click', function (ev) {
+    blurSelf(ev.currentTarget);
+    playAll();
+  });
   var resumeBtn = $('#btn-resume');
   if (resumeBtn) {
     resumeBtn.addEventListener('click', function (ev) {
+      blurSelf(resumeBtn);
       if (ev && ev.shiftKey) { clearResume(); return; }   /* Shift+点击 = 清除记录 */
       playResume();
     });
@@ -1274,8 +1292,8 @@ function sendPlayerAction(action, value) {
 }
 
 function bindPlayerBar() {
-  $('#btn-stop').addEventListener('click', function () { sendPlayerAction('stop'); });
-  $('#btn-toggle').addEventListener('click', function () { sendPlayerAction('toggle'); });
+  $('#btn-stop').addEventListener('click', function (ev) { blurSelf(ev.currentTarget); sendPlayerAction('stop'); });
+  $('#btn-toggle').addEventListener('click', function (ev) { blurSelf(ev.currentTarget); sendPlayerAction('toggle'); });
   $('#btn-mute').addEventListener('click', function () {
     var p = state.player || emptyPlayer();
     sendPlayerAction('mute', p.mute ? 0 : 1);
@@ -1731,12 +1749,24 @@ function bindKeyboard() {
 
     if (isTypingTarget(ev.target)) return;
 
+    var dialogOpen = !$('#dlg-album').classList.contains('hidden')
+      || !$('#dlg-settings').classList.contains('hidden');
+
+    /* 空格永远是"播放/暂停"，不落到按钮上。
+       否则：焦点还停在「继续观看 / 播放全部 / 行的 ▶」这类按钮上时（鼠标点过就会留在那儿），
+       按空格 = 又点了一次那个按钮 → 重新加载文件 → 进度看起来跳回起点后又被续播。 */
+    if ((ev.key === ' ' || ev.code === 'Space') && isPlayerActive()) {
+      ev.preventDefault();
+      if (!dialogOpen) sendPlayerAction('toggle');
+      return;
+    }
+
     /* 焦点在按钮 / 链接上时交给浏览器原生行为（空格点击、回车激活） */
     var tag = ev.target && ev.target.tagName ? ev.target.tagName.toLowerCase() : '';
     if (tag === 'button' || tag === 'a') return;
 
     /* 对话框打开时不再处理下面的全局快捷键 */
-    if (!$('#dlg-album').classList.contains('hidden') || !$('#dlg-settings').classList.contains('hidden')) return;
+    if (dialogOpen) return;
 
     if (ev.key === '/') {
       ev.preventDefault();

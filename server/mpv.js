@@ -402,10 +402,12 @@ class MpvController extends EventEmitter {
             s.paused = !!msg.data;
             break;
           case 'time-pos':
-            s.position = typeof msg.data === 'number' ? msg.data : 0;
+            // 重新加载文件的瞬间 mpv 会把这个属性报成 null：
+            // 不能当成 0，否则界面进度条会"跳回起点"（真正的归零由 stop/idle 显式处理）
+            if (typeof msg.data === 'number') s.position = msg.data;
             break;
           case 'duration':
-            s.duration = typeof msg.data === 'number' ? msg.data : 0;
+            if (typeof msg.data === 'number') s.duration = msg.data;
             break;
           case 'volume':
             s.volume = typeof msg.data === 'number' ? Math.round(msg.data) : s.volume;
@@ -474,6 +476,11 @@ class MpvController extends EventEmitter {
     if (!url) return;
     const item = this._findItemByUrl(url);
     if (item) {
+      // 换了文件：进度/时长归零交给这里显式处理（time-pos 报 null 时我们不再清零）
+      if (this.state.path && this.state.path !== item.path) {
+        this.state.position = 0;
+        this.state.duration = 0;
+      }
       this.state.albumId = item.albumId;
       this.state.path = item.path;
       this.state.mediaTitle = item.title || item.name || this.state.mediaTitle;

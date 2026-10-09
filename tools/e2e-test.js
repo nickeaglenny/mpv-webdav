@@ -152,7 +152,7 @@ function readLog(file) {
         '--vo=null',
         '--ao=null',
         '--force-window=no',
-        '--length=6',
+        '--length=60',
         '--msg-level=all=info',
         '--log-file=' + MPV_LOG,
       ],
@@ -512,7 +512,28 @@ function readLog(file) {
       const pathNow = await playerPath();
       check('切集后播放状态指向第 02 集', pathNow === ep2.path, `path=${pathNow}`);
 
-      // 4) 点「继续观看」= 播最近这条：应当续播
+      // 4) 按空格暂停：不该出现"进度归零 / 自动续播"（回归：曾因 time-pos 报 null 与重载导致）
+      await api('POST', '/api/play', { albumId: album.id, path: '/电影/测试影片.mkv', mode: 'replace', loadSubs: true });
+      await sleep(3000);
+      const beforePause = (await api('GET', '/api/player')).json.player;
+      await api('POST', '/api/player', { action: 'toggle' });     // 等价于按空格
+      await sleep(400);
+      const paused1 = (await api('GET', '/api/player')).json.player;
+      check('按暂停后处于暂停状态', paused1.paused === true, `paused=${paused1.paused}`);
+      check('暂停瞬间进度不归零', paused1.position >= beforePause.position - 0.5,
+        `position=${paused1.position} 之前=${beforePause.position}`);
+      check('暂停期间仍是同一个文件', paused1.path === beforePause.path && paused1.albumId === beforePause.albumId,
+        `${paused1.albumId}${paused1.path}`);
+      await sleep(2500);
+      const paused2 = (await api('GET', '/api/player')).json.player;
+      check('暂停不会被自动续播', paused2.paused === true, `paused=${paused2.paused}`);
+      check('暂停期间进度保持不动', Math.abs(paused2.position - paused1.position) < 0.6,
+        `${paused1.position} → ${paused2.position}`);
+      await api('POST', '/api/player', { action: 'toggle' });     // 恢复播放，收尾用
+      await sleep(300);
+      check('再按一次可以继续播放', (await api('GET', '/api/player')).json.player.paused === false);
+
+      // 5) 点「继续观看」= 播最近这条：应当续播
       recEp = await getResume();
       r = await api('POST', '/api/play', { albumId: album.id, path: recEp.path, mode: 'replace', loadSubs: true });
       check('剧集续播：接口报告了"将续播"', !!(r.json && r.json.resumed > 0),
