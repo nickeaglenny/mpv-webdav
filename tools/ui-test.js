@@ -518,6 +518,32 @@ class Cdp {
     await httpPost(`http://127.0.0.1:${APP_PORT}/api/player`, { action: 'stop' });
     await sleep(500);
 
+    // --- 停止播放（等价于关掉 mpv）后：列表进度自动更新，且不再弹"mpv 已退出"这类消息
+    await httpPost(`http://127.0.0.1:${APP_PORT}/api/play`,
+      { albumId: album.id, path: '/剧集/穹庐下的魔女 第03集.mp4', mode: 'single', loadSubs: false });
+    await sleep(4000);
+    const readEp3 = () => cdp.eval(`(function () {
+      var row = Array.from(document.querySelectorAll('#listing [data-path]'))
+        .filter(function (n) { return n.getAttribute('title') === '穹庐下的魔女 第03集.mp4'; })[0];
+      if (!row) return 'no-row';
+      var fill = row.querySelector('.prog-fill');
+      var pct = row.querySelector('.prog-pct');
+      return fill ? fill.style.width : (pct ? pct.textContent : 'none');
+    })()`);
+    const barBefore = await readEp3();
+    await httpPost(`http://127.0.0.1:${APP_PORT}/api/player`, { action: 'stop' });
+    let barAfter = barBefore;
+    for (let i = 0; i < 14; i++) {                 // 不手工刷新页面，等前端自己更新（约 1.2 秒后触发）
+      await sleep(700);
+      barAfter = await readEp3();
+      if (barAfter !== barBefore) break;
+    }
+    check('停止播放后列表里的进度会自动更新（不用手刷页面）',
+      barAfter !== barBefore && barAfter !== 'none' && barAfter !== 'no-row',
+      `${barBefore} → ${barAfter}`);
+    const toastText = await cdp.eval(`Array.from(document.querySelectorAll('#toasts .toast')).map(function (n) { return n.textContent; }).join(' | ')`);
+    check('不再弹"mpv 已退出"这类消息', !/已退出/.test(toastText), toastText || '(没有提示)');
+
     // --- settings dialog: 点遮罩不应该关闭
     await cdp.eval('document.querySelector("#btn-settings").click()');
     await cdp.waitFor('!document.querySelector("#dlg-settings").classList.contains("hidden")');

@@ -305,6 +305,23 @@ class MpvController extends EventEmitter {
     }
   }
 
+  // 把键盘焦点交给 mpv 的窗口。
+  // 为什么不用 SetForegroundWindow / AppActivate：从后台进程（我们的 Node）抢焦点会被 Windows 拒绝
+  // （实测 AppActivate 无效）；而"让 mpv 把自己的窗口最小化再立刻还原"是**它激活自己的窗口**，
+  // 系统一定允许（实测有效，0ms 间隔即可，闪烁几乎看不到）。
+  async focusWindow() {
+    if (this.mode !== 'ipc' || !this.ipc || !this.ipc.connected) return false;
+    if (this.store.settings.mpvFocusOnPlay === false) return false;
+    if (!this.state.running || this.state.idle) return false;
+    try {
+      await this.ipc.send(['set_property', 'window-minimized', true]);
+      await this.ipc.send(['set_property', 'window-minimized', false]);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   baseArgs() {
     const s = this.store.settings;
     const args = [
@@ -416,7 +433,10 @@ class MpvController extends EventEmitter {
       this.state.running = false;
       this.state.idle = true;
       this.state.paused = false;
-      this.emit('log', { level: 'warn', message: 'mpv 已退出' });
+      this.state.position = 0;
+      // 关掉 mpv 窗口是正常操作，不必在网页上弹消息（只在服务端日志留一行）；
+      // 前端会借这次"播放结束"的状态变化去刷新列表里的进度。
+      console.log('[mpv] 窗口已关闭（进度已保存，下次播放会重新拉起）');
       this.emitState(true);
       this.child = null;
       this.ipc = null;
@@ -664,6 +684,10 @@ class MpvController extends EventEmitter {
       }
       if (mode !== 'append') {
         await this.ipc.send(['set_property', 'playlist-pos', 0]).catch(() => {});
+        // 窗口通常是 loadfile 之后才出现：稍等一下再把键盘焦点要过来，
+        // 这样用户在网页里按下播放后，直接按空格就能暂停（不用先点一下 mpv）
+        const t = setTimeout(() => { this.focusWindow().catch(() => {}); }, 350);
+        if (t.unref) t.unref();
       }
     } else {
       if (mode === 'append') {

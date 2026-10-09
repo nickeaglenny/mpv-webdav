@@ -1067,9 +1067,36 @@ function applyPlayer(ps) {
      ① 标签页标题显示进度 ② 播放结束后稍等片刻再拉一次「继续观看」 */
   renderTabTitle();
   if (wasActive && !isPlayerActive()) {
-    window.setTimeout(function () { refreshResume(true); }, 1200);
+    /* 播放结束 / mpv 被关掉：等 mpv 把进度写进 watch-later（很可能是它退出时写的），
+       然后 ① 刷新「继续观看」记录 ② 刷新列表里那一行的进度条 */
+    window.setTimeout(function () {
+      refreshResume(true);
+      refreshProgress();
+    }, 1200);
   }
   if (ps.error) setStatus('播放器错误：' + ps.error, 'error');
+}
+
+/** 只刷新当前目录里各条目的播放进度（不重新加载目录、不动选中项与搜索框） */
+function refreshProgress() {
+  if (!state.browse.albumId || state.browse.loading) return Promise.resolve();
+  var albumId = state.browse.albumId;
+  var path = state.browse.path;
+  return apiBrowse(albumId, path).then(function (res) {
+    if (state.browse.albumId !== albumId || state.browse.path !== path) return;   /* 已经翻到别处了 */
+    var fresh = {};
+    (Array.isArray(res.entries) ? res.entries : []).forEach(function (e) { fresh[e.path] = e; });
+    var changed = false;
+    state.browse.entries.forEach(function (e) {
+      var now = fresh[e.path];
+      if (!now) return;
+      var before = JSON.stringify(e.progress || null);
+      var after = JSON.stringify(now.progress || null);
+      if (before !== after) { e.progress = now.progress; changed = true; }
+      if (e.subtitleCount !== now.subtitleCount) { e.subtitleCount = now.subtitleCount; changed = true; }
+    });
+    if (changed) renderListing();
+  }).catch(function () { /* 只是刷新进度，失败就静默 */ });
 }
 
 /** 浏览器标签页标题显示播放进度：切到别的标签也能看到播到哪了。 */
@@ -1348,6 +1375,7 @@ function openSettingsDialog() {
   $('#st-sub-fallback').checked = st.subFallbackSingleVideo !== false;
   $('#st-sub-encoding').value = st.subEncoding || 'auto';
   $('#st-mpv-ontop').checked = st.mpvOntop !== false;
+  $('#st-mpv-focus').checked = st.mpvFocusOnPlay !== false;
   $('#st-mpv-fullscreen').checked = st.mpvAutoFullscreen === true;
   $('#st-wl-max').value = String(typeof st.watchLaterMaxEntries === 'number' ? st.watchLaterMaxEntries : 200);
   $('#st-wl-days').value = String(typeof st.watchLaterMaxDays === 'number' ? st.watchLaterMaxDays : 90);
@@ -1378,6 +1406,7 @@ function saveSettingsFromDialog() {
     subFallbackSingleVideo: !!$('#st-sub-fallback').checked,
     subEncoding: $('#st-sub-encoding').value,
     mpvOntop: !!$('#st-mpv-ontop').checked,
+    mpvFocusOnPlay: !!$('#st-mpv-focus').checked,
     mpvAutoFullscreen: !!$('#st-mpv-fullscreen').checked,
     watchLaterMaxEntries: Math.max(0, parseInt($('#st-wl-max').value, 10) || 0),
     watchLaterMaxDays: Math.max(0, parseInt($('#st-wl-days').value, 10) || 0),
@@ -1547,6 +1576,15 @@ function bindKeyboard() {
     closeCtxMenu();
   });
   window.addEventListener('blur', closeCtxMenu);
+
+  /* 回到这个标签页时顺手刷新一次播放进度（关了 mpv 再回来，进度条应该已经更新了） */
+  function refreshOnReturn() {
+    if (document.visibilityState === 'hidden') return;
+    refreshProgress();
+    refreshResume(true);
+  }
+  window.addEventListener('focus', refreshOnReturn);
+  document.addEventListener('visibilitychange', refreshOnReturn);
 }
 
 /* ============================ 14. 启动引导 ============================ */

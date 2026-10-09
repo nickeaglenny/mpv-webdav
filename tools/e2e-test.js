@@ -642,6 +642,15 @@ function readLog(file) {
       console.log('SKIP  剧集续播（回退模式无法采集位置）');
     }
 
+    // --- 焦点设置：开始播放时把键盘焦点交给 mpv（默认开）
+    r = await api('GET', '/api/settings');
+    check('设置里有"播放时把焦点交给 mpv"且默认开启',
+      !!(r.json && r.json.mpvFocusOnPlay === true), JSON.stringify(r.json && r.json.mpvFocusOnPlay));
+    r = await api('PUT', '/api/settings', { mpvFocusOnPlay: false });
+    check('可以关掉它', !!(r.json && r.json.settings && r.json.settings.mpvFocusOnPlay === false));
+    r = await api('PUT', '/api/settings', { mpvFocusOnPlay: true });
+    check('可以再打开', !!(r.json && r.json.settings && r.json.settings.mpvFocusOnPlay === true));
+
     // --- 置顶 / 自动全屏 开关（默认：置顶开、全屏关）
     r = await api('PUT', '/api/settings', { mpvOntop: false, mpvAutoFullscreen: true });
     check('设置里能关掉置顶、打开自动全屏',

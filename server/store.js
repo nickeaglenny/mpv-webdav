@@ -27,6 +27,7 @@ const DEFAULT_SETTINGS = {
   watchLaterMaxDays: 90,      // 超过多少天没动过的进度自动清掉（0 = 不按天数清）
   // 播放时的 mpv 窗口行为
   mpvOntop: true,             // 播放中把 mpv 窗口置顶（空闲时自动取消，避免挡住桌面）
+  mpvFocusOnPlay: true,       // 开始播放时把键盘焦点交给 mpv（否则按空格暂停前得先点一下窗口）
   mpvAutoFullscreen: false,   // 播放中自动全屏（默认关闭）
 };
 
@@ -329,6 +330,7 @@ class Store {
       next.watchLaterMaxDays = Number.isFinite(v) && v >= 0 ? Math.min(3650, v) : next.watchLaterMaxDays;
     }
     if (src.mpvOntop !== undefined) next.mpvOntop = !!src.mpvOntop;
+    if (src.mpvFocusOnPlay !== undefined) next.mpvFocusOnPlay = !!src.mpvFocusOnPlay;
     if (src.mpvAutoFullscreen !== undefined) next.mpvAutoFullscreen = !!src.mpvAutoFullscreen;
     for (const key of ['videoExts', 'audioExts', 'subExts', 'subDirs', 'extraMpvArgs']) {
       if (src[key] === undefined) continue;
