@@ -76,6 +76,76 @@ function currentResume() {
   return null;
 }
 
+// ---- 时长缓存（列表里的进度条需要"总时长"，mpv 只存"已看多少秒"）--------------
+const DUR_FILE = path.join(store.cacheDir, 'durations.json');
+let durations = watchlater.loadDurations(DUR_FILE);
+let durationsSaveTimer = null;
+
+function saveDurationsSoon() {
+  if (durationsSaveTimer) return;
+  durationsSaveTimer = setTimeout(() => {
+    durationsSaveTimer = null;
+    watchlater.saveDurations(DUR_FILE, durations);
+  }, 1500);
+  if (durationsSaveTimer.unref) durationsSaveTimer.unref();
+}
+
+function rememberDuration(albumId, rel, dur) {
+  if (!albumId || !rel || !(dur > 0)) return;
+  const key = watchlater.keyFor(streamUrl(albumId, rel));
+  const prev = durations[key];
+  if (prev && prev.dur > 0 && Math.abs(prev.dur - dur) < 0.5) return;
+  durations[key] = { dur, updatedAt: Date.now() };
+  saveDurationsSoon();
+}
+
+// 老文件（有进度但没记过时长，比如升级前看的）补探一次时长：
+// 顺序执行、每次最多 3 个、只在没有在播时做；探过但拿不到时长的 7 天后再试
+const probeQueue = [];
+let probing = false;
+
+function needsDuration(key) {
+  const d = durations[key];
+  if (!d) return true;
+  if (d.dur > 0) return false;
+  return Date.now() - (d.updatedAt || 0) > 7 * 24 * 3600 * 1000;
+}
+
+function queueDurationProbe(items) {
+  let added = 0;
+  for (const it of items) {
+    if (added >= 3) break;
+    const key = watchlater.keyFor(streamUrl(it.albumId, it.path));
+    if (!needsDuration(key)) continue;
+    if (probeQueue.some((q) => q.key === key)) continue;
+    probeQueue.push({ key, albumId: it.albumId, path: it.path, url: streamUrl(it.albumId, it.path) });
+    added++;
+  }
+  runProbeQueue();
+}
+
+async function runProbeQueue() {
+  if (probing || !probeQueue.length) return;
+  probing = true;
+  try {
+    while (probeQueue.length) {
+      if (mpv.isBusy()) return;                       // 正在看片就不打扰
+      const job = probeQueue.shift();
+      const dur = await mpv.probeDuration(job.url);
+      durations[job.key] = { dur: dur || 0, updatedAt: Date.now() };
+      saveDurationsSoon();
+      if (dur > 0) {
+        const progress = watchlater.progressFor(watchlater.readEntry(WL_DIR, job.url), durations[job.key]);
+        if (progress) broadcast('progress', { albumId: job.albumId, path: job.path, progress });
+      }
+    }
+  } finally {
+    probing = false;
+  }
+}
+
+mpv.on('duration', (info) => rememberDuration(info.albumId, info.path, info.duration));
+
 function pruneWatchLater() {
   const s = store.settings;
   try {
@@ -86,6 +156,10 @@ function pruneWatchLater() {
     if (r.removed > 0) {
       mpv.emit('log', { level: 'info', message: `已清理 ${r.removed} 条过期播放进度（保留上限 ${s.watchLaterMaxEntries} 条 / ${s.watchLaterMaxDays} 天）` });
     }
+    // 进度条目没了，对应的时长缓存也跟着清掉（内存同步更新）
+    const live = new Set(watchlater.scan(WL_DIR).map((e) => e.key));
+    const dr = watchlater.pruneDurations(DUR_FILE, live);
+    if (dr.removed > 0) durations = watchlater.loadDurations(DUR_FILE);
     return r;
   } catch (err) {
     mpv.emit('log', { level: 'warn', message: '清理播放进度失败：' + err.message });
@@ -317,6 +391,19 @@ async function handleBrowse(query) {
     }
     return base;
   });
+
+  // 播放进度：一次扫描 watch-later 目录，再逐条查表 —— 不给 WebDAV 服务器添任何额外请求
+  const posMap = new Map(watchlater.scan(WL_DIR).map((e) => [e.key, e]));
+  const probeWanted = [];
+  for (const e of mapped) {
+    if (e.isDir || (e.kind !== 'video' && e.kind !== 'audio')) continue;
+    const key = watchlater.keyFor(streamUrl(album.id, e.path));
+    const progress = watchlater.progressFor(posMap.get(key), durations[key]);
+    if (!progress) continue;
+    e.progress = progress;
+    if (!progress.dur) probeWanted.push({ albumId: album.id, path: e.path });
+  }
+  if (probeWanted.length) queueDurationProbe(probeWanted);
 
   return { ok: true, albumId: album.id, path: rel, parent: rel === '/' ? null : rel.replace(/\/[^/]*$/, '') || '/', entries: mapped };
 }

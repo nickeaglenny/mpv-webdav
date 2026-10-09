@@ -448,6 +448,32 @@ class Cdp {
       await sleep(500);
     }
 
+    // --- 列表里显示播放进度（mpv 记的"看到哪了" + 时长缓存 → 一条小进度条）
+    let barInfo = null;
+    for (let i = 0; i < 12; i++) {
+      await cdp.eval(`loadBrowse(${JSON.stringify(album.id)}, '/电影')`);
+      await sleep(800);
+      barInfo = await cdp.eval(`(function () {
+        var row = Array.from(document.querySelectorAll('#listing [data-path]'))
+          .filter(function (n) { return n.getAttribute('title') === '测试影片.mkv'; })[0];
+        if (!row) return null;
+        var fill = row.querySelector('.prog-fill');
+        var pct = row.querySelector('.prog-pct');
+        if (!fill) return null;
+        return JSON.stringify({ width: fill.style.width, pct: pct ? pct.textContent : '' });
+      })()`);
+      if (barInfo) break;
+    }
+    check('列表里显示播放进度条', !!barInfo, barInfo || '没看到进度条');
+    if (barInfo) {
+      const info = JSON.parse(barInfo);
+      check('进度条有具体宽度与百分比', /%$/.test(info.width || '') && parseInt(info.width, 10) > 0,
+        `width=${info.width} pct=${info.pct}`);
+      const shot3 = await cdp.send('Page.captureScreenshot', { format: 'png' });
+      fs.writeFileSync(path.join(WORK, 'ui-progress.png'), Buffer.from(shot3.data, 'base64'));
+      check('已保存进度条截图', fs.existsSync(path.join(WORK, 'ui-progress.png')));
+    }
+
     // --- settings dialog: 点遮罩不应该关闭
     await cdp.eval('document.querySelector("#btn-settings").click()');
     await cdp.waitFor('!document.querySelector("#dlg-settings").classList.contains("hidden")');

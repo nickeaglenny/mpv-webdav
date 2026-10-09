@@ -11,10 +11,13 @@
 // proxy URL, plus every discovered subtitle as a `sub-files-append` entry.
 
 const net = require('net');
+const os = require('os');
+const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
 const { EventEmitter } = require('events');
 const media = require('./media');
+const watchlater = require('./watchlater');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -254,6 +257,54 @@ class MpvController extends EventEmitter {
     }
   }
 
+  // 是否"确实在播"？（探时长前确认一下，别去抢带宽和进程）
+  // 暂停中、播完停住（keep-open）都不算，那些时候补探时长不会打扰用户
+  isBusy() {
+    if (!this.mode) return false;
+    const s = this.state;
+    return !!(s.running && !s.idle && !s.paused && !s.eof);
+  }
+
+  // 让 mpv 快速探一个文件的时长（只解码 1 帧就退出）。
+  // 输出重定向到临时文件而不是管道：管道在受限环境里会被拒（EPERM），文件不会有这个问题。
+  async probeDuration(url, timeoutMs = 25000) {
+    const exe = this.mpvPath();
+    if (!exe || !fs.existsSync(exe) || !url) return null;
+    const tmp = path.join(os.tmpdir(), `mpv-webdav-dur-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.txt`);
+    let fd = null;
+    let child = null;
+    try {
+      fd = fs.openSync(tmp, 'w');
+      const args = [
+        '--no-config', '--vo=null', '--ao=null', '--frames=1',
+        '--term-playing-msg=DUR=${duration}',
+        '--no-save-position-on-quit',
+        url,
+      ];
+      await new Promise((resolve) => {
+        let settled = false;
+        const done = () => { if (!settled) { settled = true; resolve(); } };
+        try {
+          child = spawn(exe, args, { stdio: ['ignore', fd, 'ignore'], windowsHide: true });
+        } catch {
+          return done();
+        }
+        const timer = setTimeout(() => { try { child.kill(); } catch { /* ignore */ } done(); }, timeoutMs);
+        if (timer.unref) timer.unref();
+        child.on('error', () => { clearTimeout(timer); done(); });
+        child.on('exit', () => { clearTimeout(timer); done(); });
+      });
+      const text = fs.readFileSync(tmp, 'utf8');
+      const line = text.split(/\r?\n/).find((l) => l.includes('DUR='));
+      return line ? watchlater.parseClock(line.replace(/.*DUR=/, '')) : null;
+    } catch {
+      return null;
+    } finally {
+      try { if (fd != null) fs.closeSync(fd); } catch { /* ignore */ }
+      try { fs.unlinkSync(tmp); } catch { /* ignore */ }
+    }
+  }
+
   baseArgs() {
     const s = this.store.settings;
     const args = [
@@ -406,8 +457,17 @@ class MpvController extends EventEmitter {
             // 不能当成 0，否则界面进度条会"跳回起点"（真正的归零由 stop/idle 显式处理）
             if (typeof msg.data === 'number') s.position = msg.data;
             break;
+          case 'eof-reached':
+            s.eof = !!msg.data;
+            break;
           case 'duration':
-            if (typeof msg.data === 'number') s.duration = msg.data;
+            if (typeof msg.data === 'number') {
+              s.duration = msg.data;
+              // 交给 index.js 记进"时长缓存"（列表里的进度条需要总时长，mpv 自己只存已看秒数）
+              if (msg.data > 0 && s.path) {
+                this.emit('duration', { albumId: s.albumId, path: s.path, duration: msg.data });
+              }
+            }
             break;
           case 'volume':
             s.volume = typeof msg.data === 'number' ? Math.round(msg.data) : s.volume;

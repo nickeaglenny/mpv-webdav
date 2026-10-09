@@ -399,6 +399,43 @@ function readLog(file) {
     r = await api('GET', '/api/resume');
     check('GET /api/resume 可用', r.status === 200 && !!(r.json && r.json.ok), JSON.stringify(r.json && r.json.resume));
 
+    // --- 列表里的播放进度条：老进度（只有"已看多少秒"、没有时长）应能被自动补探出总时长
+    {
+      const probeRel = '/剧集/穹庐下的魔女 第03集.mp4';
+      const probeUrl = `http://127.0.0.1:${APP_PORT}/stream/${state0.streamToken}/${album.id}${encodeURI(probeRel)}`;
+      fs.mkdirSync(wlDir, { recursive: true });
+      fs.writeFileSync(path.join(wlDir, wlKeyFor(probeUrl)), `# ${probeUrl}\nstart=5.000000\n`, 'utf8');
+      fs.rmSync(path.join(dataDir, 'cache', 'durations.json'), { force: true });   // 模拟"升级前看的"：有进度、没时长
+      await api('POST', '/api/player', { action: 'stop' });                        // 确保没在播，补探才会跑
+      await sleep(600);
+
+      let ep3 = null;
+      let plain = null;
+      let firstProgress = null;
+      for (let i = 0; i < 40; i++) {
+        const b = await api('GET', `/api/browse?albumId=${album.id}&path=${encodeURIComponent('/剧集')}`);
+        const list = (b.json && b.json.entries) || [];
+        ep3 = list.find((e) => e.path === probeRel);
+        plain = list.find((e) => e.path === '/剧集/穹庐下的魔女 第01集.mp4');
+        if (ep3 && ep3.progress) {
+          if (!firstProgress) firstProgress = JSON.parse(JSON.stringify(ep3.progress));
+          if (ep3.progress.dur > 0) break;
+        }
+        await sleep(700);
+      }
+      check('列表进度：能读到"已看多少"', !!(ep3 && ep3.progress && ep3.progress.pos === 5),
+        JSON.stringify(firstProgress || (ep3 && ep3.progress)));
+      check('列表进度：自动补探到总时长（进度条有比例）',
+        !!(ep3 && ep3.progress && ep3.progress.dur > 0 && ep3.progress.ratio > 0),
+        ep3 && ep3.progress ? `pos=${ep3.progress.pos} dur=${ep3.progress.dur} ${ep3.progress.percent}%` : '没有 progress');
+      await sleep(2200);   // 时长缓存是延迟落盘的（1.5 秒防抖）
+      check('时长缓存写在 cache/durations.json', fs.existsSync(path.join(dataDir, 'cache', 'durations.json')));
+      check('没有进度的文件不会凭空显示进度条', !!plain && plain.progress === undefined,
+        plain ? JSON.stringify(plain.progress) : '没找到第01集');
+      fs.rmSync(path.join(wlDir, wlKeyFor(probeUrl)), { force: true });            // 清掉，别影响后面的用例
+      fs.rmSync(path.join(dataDir, 'cache', 'durations.json'), { force: true });
+    }
+
     if (playing && playing.mode === 'ipc') {
       const movieUrl = `http://127.0.0.1:${APP_PORT}/stream/${state0.streamToken}/${album.id}${encodeURI('/电影/测试影片.mkv')}`;
       const movieKey = wlKeyFor(movieUrl);

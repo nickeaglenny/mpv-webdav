@@ -531,6 +531,20 @@ function subBadgeHtml(entry) {
   return '<span class="sub-badge" data-act="subs" title="' + esc(tip) + '">字幕 ×' + esc(n) + '</span>';
 }
 
+/* 播放进度：mpv 记的"看到哪了" + 我们缓存的时长 → 一条小进度条。
+   只知道已看时间、不知道总时长时，退化成文字（已看 12:34），不给假比例。 */
+function progressHtml(entry) {
+  var p = entry && entry.progress;
+  if (!p || !(p.pos > 0)) return '';
+  var tip = '上次看到 ' + fmtClock(p.pos) + (p.dur ? ' / 共 ' + fmtClock(p.dur) + '（' + p.percent + '%）' : '（总时长未知）');
+  var bar = (p.ratio == null)
+    ? ''
+    : '<span class="prog" title="' + esc(tip) + '"><span class="prog-fill" style="width:' +
+      Math.max(1, Math.round(p.ratio * 100)) + '%"></span></span>';
+  var label = (p.ratio == null) ? ('已看 ' + fmtClock(p.pos)) : (p.percent + '%');
+  return bar + '<span class="prog-pct" title="' + esc(tip) + '">' + esc(label) + '</span>';
+}
+
 function canPlay(entry) { return entry && !entry.isDir && (entry.kind === 'video' || entry.kind === 'audio'); }
 
 function renderListing() {
@@ -581,7 +595,7 @@ function renderListing() {
         '<div class="card-icon ic-' + esc(kind) + '">' + (ICONS[kind] || ICONS.other) + '</div>' +
         '<div class="card-name">' + esc(e.name) + '</div>' +
         '<div class="card-meta">' + (e.isDir ? '<span class="kind-badge kind-dir">文件夹</span>'
-                                              : esc(fmtSize(e.size))) + subBadgeHtml(e) + '</div>' +
+                                              : esc(fmtSize(e.size))) + subBadgeHtml(e) + progressHtml(e) + '</div>' +
         '</div>';
     }).join('');
     box.innerHTML = '<div class="grid">' + cards + '</div>';
@@ -597,7 +611,7 @@ function renderListing() {
     return '<div class="row' + (e.isDir ? ' is-dir' : '') + (i === state.selIndex ? ' is-selected' : '') + '"' +
       ' data-i="' + i + '" data-path="' + esc(e.path) + '" data-kind="' + esc(kind) + '" title="' + esc(e.name) + '">' +
       '<div class="col-name">' + entryIconHtml(e) +
-        '<span class="entry-name">' + esc(e.name) + '</span>' + subBadgeHtml(e) + '</div>' +
+        '<span class="entry-name">' + esc(e.name) + '</span>' + subBadgeHtml(e) + progressHtml(e) + '</div>' +
       '<div class="col-size">' + (e.isDir ? '—' : esc(fmtSize(e.size))) + '</div>' +
       '<div class="col-mtime">' + esc(fmtDate(e.mtime)) + '</div>' +
       '<div>' + kindBadgeHtml(e) + '</div>' +
@@ -1043,6 +1057,18 @@ function startEvents() {
   es.addEventListener('player', function (ev) {
     var data = safeJson(ev.data);
     if (data) applyPlayer(data);
+  });
+
+  es.addEventListener('progress', function (ev) {
+    /* 服务端补探到了某个文件的时长（老进度没有时长）：就地更新那一行，不重新拉目录 */
+    var data = safeJson(ev.data);
+    if (!data || !data.path || !data.progress) return;
+    if (data.albumId !== state.browse.albumId) return;
+    var hit = false;
+    state.browse.entries.forEach(function (e) {
+      if (e.path === data.path) { e.progress = data.progress; hit = true; }
+    });
+    if (hit) renderListing();
   });
 
   es.addEventListener('log', function (ev) {

@@ -733,3 +733,24 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; colo
   .list-head, .row { grid-template-columns: minmax(0, 1fr) 78px 62px 132px; }
   .list-head .col-mtime { display: none; }
 }
+/* 播放进度（列表 / 网格里的小进度条） */
+.prog {
+  position: relative;
+  display: inline-block;
+  width: 54px;
+  height: 4px;
+  margin-left: 6px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, .16);
+  overflow: hidden;
+  vertical-align: middle;
+  flex: 0 0 auto;
+}
+.prog-fill { position: absolute; left: 0; top: 0; bottom: 0; background: var(--accent); border-radius: 2px; }
+.prog-pct {
+  margin-left: 5px;
+  font-size: 11px;
+  color: var(--text-mute);
+  font-variant-numeric: tabular-nums;
+  flex: 0 0 auto;
+}

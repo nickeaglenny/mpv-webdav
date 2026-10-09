@@ -115,6 +115,30 @@ check('formatClock 超过一小时', wl.formatClock(3725) === '1:02:05', wl.form
 check('describe 输出「文件名 · 时间」', wl.describe({ pos: 754, target: URL1 }, '第01集.mp4') === '第01集.mp4 · 12:34',
   wl.describe({ pos: 754, target: URL1 }, '第01集.mp4'));
 
+// ---------- 时长缓存与进度形状（列表里的进度条靠它） ----------
+reset();
+const DUR = path.join(WORK, 'durations.json');
+check('时长缓存初始为空', Object.keys(wl.loadDurations(DUR)).length === 0);
+wl.saveDurations(DUR, { AAA: { dur: 100, updatedAt: 1 }, BBB: { dur: 0, updatedAt: 2 } });
+const durs = wl.loadDurations(DUR);
+check('时长缓存能读回', durs.AAA && durs.AAA.dur === 100 && durs.BBB.dur === 0);
+
+const pKnown = wl.progressFor({ pos: 50, updatedAt: 10 }, durs.AAA);
+check('知道总时长时给出比例与百分比', !!pKnown && pKnown.ratio === 0.5 && pKnown.percent === 50, JSON.stringify(pKnown));
+check('已看超过总时长时比例封顶 1', wl.progressFor({ pos: 200 }, { dur: 100 }).ratio === 1);
+check('不知道总时长时不给假比例（ratio=null）',
+  (() => { const p = wl.progressFor({ pos: 50 }, durs.BBB); return p && p.ratio === null && p.dur === null; })());
+check('没有进度就没有进度对象', wl.progressFor(null, durs.AAA) === null && wl.progressFor({ pos: 0 }, durs.AAA) === null);
+
+const durPruned = wl.pruneDurations(DUR, new Set(['AAA']));
+const left = wl.loadDurations(DUR);
+check('时长缓存跟着进度条目一起清理', durPruned.removed === 1 && !!left.AAA && !left.BBB, JSON.stringify(durPruned));
+
+check('parseClock 解析 HH:MM:SS', wl.parseClock('00:20:35') === 1235, String(wl.parseClock('00:20:35')));
+check('parseClock 解析 MM:SS', wl.parseClock('12:34') === 754, String(wl.parseClock('12:34')));
+check('parseClock 解析带小数的秒', Math.abs(wl.parseClock('00:01:02.5') - 62.5) < 0.01);
+check('parseClock 解析不了就返回 null', wl.parseClock('(error)') === null && wl.parseClock('') === null);
+
 fs.rmSync(WORK, { recursive: true, force: true });
 console.log('');
 console.log(`结果: ${results.filter((r) => r.ok).length}/${results.length} 通过`);

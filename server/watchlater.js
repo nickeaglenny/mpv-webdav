@@ -213,9 +213,87 @@ function describe(entry, name) {
   return `${name || path.basename(entry.target || '')} · ${formatClock(entry.pos)}`;
 }
 
+// ---- 时长（旁挂缓存）--------------------------------------------------------
+// mpv 的进度条目里只有"已看多少秒"（start=），**没有总时长**，所以要画进度条，
+// 得我们自己记一份时长：播放时从 mpv 的 duration 属性拿到，写进 cache/durations.json。
+// 它是缓存：键与进度条目相同（MD5(URL)），跟着进度条目一起清理，整个 cache/ 可随手删。
+
+function atomicWrite(file, value) {
+  const tmp = file + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(value, null, 2), 'utf8');
+  fs.renameSync(tmp, file);
+}
+
+function loadDurations(file) {
+  let raw;
+  try {
+    raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    return {};
+  }
+  if (!raw || typeof raw !== 'object') return {};
+  const out = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (!value || typeof value !== 'object') continue;
+    const dur = Number(value.dur);
+    if (!Number.isFinite(dur) || dur < 0) continue;
+    out[key] = { dur, updatedAt: Number(value.updatedAt) || 0 };
+  }
+  return out;
+}
+
+function saveDurations(file, map) {
+  try {
+    ensureDir(path.dirname(file));
+    atomicWrite(file, map);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// 只保留"进度条目还在"的时长（进度被 LRU 清掉了，时长也跟着走）
+function pruneDurations(file, liveKeys) {
+  const map = loadDurations(file);
+  const keep = liveKeys instanceof Set ? liveKeys : new Set(liveKeys || []);
+  let removed = 0;
+  for (const key of Object.keys(map)) {
+    if (!keep.has(key)) { delete map[key]; removed++; }
+  }
+  if (removed > 0) saveDurations(file, map);
+  return { removed, kept: Object.keys(map).length };
+}
+
+// 进度 + 时长的对外形状：ratio/percent 只在知道总时长时才有
+function progressFor(entry, durEntry) {
+  if (!entry || !(Number(entry.pos) > 0)) return null;
+  const pos = Number(entry.pos);
+  const dur = durEntry && Number(durEntry.dur) > 0 ? Number(durEntry.dur) : null;
+  const ratio = dur ? Math.min(1, Math.max(0, pos / dur)) : null;
+  return {
+    pos,
+    dur,
+    ratio,
+    percent: ratio == null ? null : Math.max(1, Math.round(ratio * 100)),
+    updatedAt: entry.updatedAt || (durEntry && durEntry.updatedAt) || 0,
+  };
+}
+
+// 把 "HH:MM:SS" / "MM:SS" 解析成秒（mpv 的 ${duration} 就是这个格式）
+function parseClock(text) {
+  const m = /(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(String(text || ''))
+    || /(\d+):(\d+(?:\.\d+)?)/.exec(String(text || ''));
+  if (!m) return null;
+  const secs = m.length === 4
+    ? Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3])
+    : Number(m[1]) * 60 + Number(m[2]);
+  return Number.isFinite(secs) && secs > 0 ? secs : null;
+}
+
 module.exports = {
   ensureDir, keyFor, entryFile, parseEntryText,
   readEntry, writeEntry, removeEntry, scan, prune,
+  loadDurations, saveDurations, pruneDurations, progressFor, parseClock,
   parseStreamUrl, migrateLegacyRecord,
   formatClock, describe,
 };
