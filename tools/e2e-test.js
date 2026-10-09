@@ -485,6 +485,25 @@ function readLog(file) {
       check('DELETE /api/resume 可用', r.status === 200 && !!(r.json && r.json.ok));
     }
 
+    // --- 每个专辑"上次浏览到哪 / 上次播了哪个文件"（data/state/views.json）
+    r = await api('PUT', `/api/views/${album.id}`, { path: '/剧集' });
+    check('接口能记录"上次浏览的目录"',
+      !!(r.json && r.json.view && r.json.view.path === '/剧集'), JSON.stringify(r.json && r.json.view));
+    r = await api('GET', '/api/state');
+    check('state 里带着这条记录',
+      !!(r.json.views && r.json.views[album.id] && r.json.views[album.id].path === '/剧集'),
+      JSON.stringify(r.json.views && r.json.views[album.id]));
+    await api('POST', '/api/play', { albumId: album.id, path: '/电影/测试影片.mkv', mode: 'single', loadSubs: false });
+    await sleep(700);
+    r = await api('GET', '/api/state');
+    check('播放后自动记下"上次播的文件"（原先的目录记录保留）',
+      !!(r.json.views && r.json.views[album.id]
+        && r.json.views[album.id].file === '/电影/测试影片.mkv'
+        && r.json.views[album.id].path === '/剧集'),
+      JSON.stringify(r.json.views && r.json.views[album.id]));
+    await api('POST', '/api/player', { action: 'stop' });
+    await sleep(400);
+
     // --- 剧集目录（一个目录多个视频）：续播记录必须指向"真正在播的那一集"
     r = await api('GET', `/api/browse?albumId=${album.id}&path=${encodeURIComponent('/剧集')}`);
     const epEntries = (r.json && r.json.entries) || [];

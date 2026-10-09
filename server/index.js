@@ -314,6 +314,8 @@ async function buildState() {
     },
     settings: store.publicSettings(),
     albums: store.listAlbums(),
+    // 每个专辑"上次浏览到哪 / 上次播了哪个文件"（有界：条数 = 专辑数）
+    views: store.getViews(),
     resume: currentResume(),
     player: mpv.getState(),
   };
@@ -516,6 +518,8 @@ async function handlePlay(body) {
   if (entry) {
     mpv.emit('log', { level: 'info', message: `从上次位置继续：${watchlater.describe(entry, name)}` });
   }
+  // 记下"这个专辑上次播的是哪个文件"（界面用它在该行打个「上次」标记；浏览目录仍以界面为准）
+  store.setView(album.id, { file: rel });
   const player = await mpv.play(items, { mode });
 
   if (forceStart === 0) {
@@ -745,6 +749,19 @@ async function route(req, res, parsed) {
       if (!album) throw Object.assign(new Error('专辑不存在'), { status: 404 });
       return sendJson(res, 200, { ok: true, album: store.publicAlbum(album) });
     }
+  }
+
+  // ---- 每个专辑"上次浏览到哪"（界面切目录时上报；播放时由服务端补记"上次播的文件"）
+  if (pathname === '/api/views' && method === 'GET') {
+    return sendJson(res, 200, { ok: true, views: store.getViews() });
+  }
+  const viewMatch = /^\/api\/views\/([^/]+)$/.exec(pathname);
+  if (viewMatch && method === 'PUT') {
+    const id = decodeURIComponent(viewMatch[1]);
+    if (!store.findAlbum(id)) return sendJson(res, 404, { ok: false, error: '专辑不存在' });
+    const body = await readBody(req);
+    const saved = store.setView(id, body && typeof body === 'object' ? body : {});
+    return sendJson(res, 200, { ok: true, view: saved });
   }
 
   // ---- 播放进度（进度本身存在 mpv 的 watch-later 目录里，这里只是读取视图）

@@ -687,6 +687,16 @@ class MpvController extends EventEmitter {
       this.state.resumedFrom = Number.isFinite(first.start) && first.start >= 0 ? first.start : 0;
       this.state.running = true;
       this.state.idle = false;
+      // 立刻按"我们刚交给 mpv 的列表"填充播放列表：
+      // 否则 IPC 模式下要等 mpv 的 playlist 事件回来，接口响应里会短暂是空的（连播时最明显）
+      this.state.playlistPos = 0;
+      this.state.playlist = this.queue.map((it, i) => ({
+        index: i,
+        title: it.title || it.name,
+        path: it.path,
+        albumId: it.albumId,
+        playing: i === 0,
+      }));
     }
     this.emitState(true);
     return this.getState();

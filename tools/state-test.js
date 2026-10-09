@@ -98,6 +98,44 @@ check('非法值不会破坏设置', st3.watchLaterMaxEntries === 0 && st3.watch
 const e2 = new Store(ROOT, 'mpv.exe');
 check('设置已落盘并可读回', e2.settings.watchLaterMaxEntries === 0);
 
+// ---------- 每个专辑"上次浏览到哪" ----------
+reset();
+const v1 = new Store(ROOT, 'mpv.exe');
+const albA = v1.createAlbum({ name: '甲', url: 'http://a.example/dav', auth: 'none' });
+const albB = v1.createAlbum({ name: '乙', url: 'http://b.example/dav', auth: 'none' });
+check('初始没有浏览记录', Object.keys(v1.getViews()).length === 0);
+v1.setView(albA.id, { path: '/影视/剧集' });
+check('能记录上次浏览的目录', (v1.getViews()[albA.id] || {}).path === '/影视/剧集', JSON.stringify(v1.getViews()[albA.id]));
+v1.setView(albA.id, { file: '/影视/剧集/第03集.mp4' });
+check('记录"上次播的文件"不会覆盖目录',
+  v1.getViews()[albA.id].path === '/影视/剧集' && v1.getViews()[albA.id].file === '/影视/剧集/第03集.mp4',
+  JSON.stringify(v1.getViews()[albA.id]));
+v1.setView(albB.id, { path: '/音乐' });
+const v2 = new Store(ROOT, 'mpv.exe');
+check('重启后能读回（两个专辑各自独立）',
+  v2.getViews()[albA.id].file === '/影视/剧集/第03集.mp4' && v2.getViews()[albB.id].path === '/音乐');
+check('给不存在的专辑记录会返回 null（不写脏数据）', v2.setView('alb_nope', { path: '/x' }) === null);
+v2.deleteAlbum(albA.id);
+check('删专辑会顺手清掉它的浏览记录', !v2.getViews()[albA.id] && !!v2.getViews()[albB.id]);
+
+// 孤儿条目（比如手工编辑过 albums.json）在启动时被清掉
+reset();
+const v3 = new Store(ROOT, 'mpv.exe');
+fs.writeFileSync(path.join(ROOT, 'state', 'views.json'), JSON.stringify({ alb_ghost: { path: '/x', file: null, updatedAt: 1 } }), 'utf8');
+const v4 = new Store(ROOT, 'mpv.exe');
+check('启动时清掉"专辑已不存在"的孤儿记录', Object.keys(v4.getViews()).length === 0);
+check('孤儿清理会落盘', JSON.parse(fs.readFileSync(path.join(ROOT, 'state', 'views.json'), 'utf8')) && Object.keys(JSON.parse(fs.readFileSync(path.join(ROOT, 'state', 'views.json'), 'utf8'))).length === 0);
+
+// 坏掉的 views.json 不该影响启动
+reset();
+fs.mkdirSync(path.join(ROOT, 'state'), { recursive: true });
+fs.writeFileSync(path.join(ROOT, 'state', 'views.json'), '{ 这不是 JSON', 'utf8');
+let vThrew = null;
+let v5 = null;
+try { v5 = new Store(ROOT, 'mpv.exe'); } catch (err) { vThrew = err; }
+check('views.json 损坏时不影响启动（当作空）', !vThrew && v5 && Object.keys(v5.getViews()).length === 0,
+  vThrew ? vThrew.message : '');
+
 // ---------- data/ 只出现三类文件 ----------
 reset();
 const f = new Store(ROOT, 'mpv.exe');

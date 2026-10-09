@@ -456,6 +456,27 @@ class Cdp {
       await sleep(500);
     }
 
+    // --- 专辑级"上次浏览到哪"：重新点专辑应回到上次浏览的目录（这里最后浏览的是「电影」）
+    await sleep(1500);                                   // 等前端把浏览位置上（800ms 节流）
+    await cdp.eval(`selectAlbum(${JSON.stringify(album.id)})`);
+    await sleep(1800);
+    const crumbBack = await cdp.eval('document.querySelector("#breadcrumb").textContent.trim()');
+    check('重新点专辑会回到上次浏览的目录', /电影/.test(crumbBack), crumbBack);
+
+    // --- 「上次」标记：最近播放的那个文件（第01集）在它所在目录里被标出来
+    await cdp.eval(`loadBrowse(${JSON.stringify(album.id)}, '/剧集')`);
+    await cdp.waitFor('Array.from(document.querySelectorAll("#listing [data-path]")).some(function (n) { return n.getAttribute("title") === "穹庐下的魔女 第01集.mp4"; })', 15000, '进入剧集目录');
+    const lastBadge = await cdp.eval(`(function () {
+      var row = Array.from(document.querySelectorAll('#listing [data-path]'))
+        .filter(function (n) { return n.getAttribute('title') === '穹庐下的魔女 第01集.mp4'; })[0];
+      if (!row) return 'no-row';
+      return JSON.stringify({
+        hasBadge: !!row.querySelector('.last-badge'),
+        view: (state.views || {})[state.browse.albumId] || null
+      });
+    })()`);
+    check('最近播放的那一集有「上次」标记', /"hasBadge":true/.test(lastBadge), lastBadge);
+
     // --- 列表里显示播放进度（mpv 记的"看到哪了" + 时长缓存 → 一条小进度条）
     let barInfo = null;
     for (let i = 0; i < 12; i++) {

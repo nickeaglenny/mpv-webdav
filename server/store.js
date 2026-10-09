@@ -84,6 +84,7 @@ class Store {
     this.watchLaterDir = path.join(this.cacheDir, 'watch-later');
     this.albumsFile = path.join(dataDir, 'albums.json');
     this.settingsFile = path.join(dataDir, 'settings.json');
+    this.viewsFile = path.join(this.stateDir, 'views.json');
     this.instanceFile = path.join(this.stateDir, 'instance.json');
     ensureDir(dataDir);
     ensureDir(this.stateDir);
@@ -104,6 +105,11 @@ class Store {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, settingsValue);
     if (!this.settings.mpvPath) this.settings.mpvPath = defaultMpvPath;
     if (settingsRead.recovered) this.saveSettings({ backup: false });
+
+    // 每个专辑"上次浏览到哪"：体积有界（条数 = 专辑数）；坏了就当空的，不影响启动
+    const viewsRead = readJson(this.viewsFile, null);
+    this.views = viewsRead && typeof viewsRead === 'object' && !Array.isArray(viewsRead) ? viewsRead : {};
+    this.pruneViews();
 
     this.instance = null;
   }
@@ -170,6 +176,56 @@ class Store {
 
   saveAlbums(opts) { writeJsonAtomic(this.albumsFile, this.albums, opts); }
   saveSettings(opts) { writeJsonAtomic(this.settingsFile, this.settings, opts); }
+  saveViews(opts) { writeJsonAtomic(this.viewsFile, this.views, opts); }
+
+  // ---- 每个专辑"上次浏览到哪 / 上次播了哪个文件" --------------------------
+  // 有界：条数 = 专辑数；专辑删掉时顺手清掉它的条目（启动时也会清一次孤儿条目）
+  getViews() {
+    const out = {};
+    for (const [id, v] of Object.entries(this.views || {})) {
+      if (!v || typeof v !== 'object') continue;
+      if (!this.findAlbum(id)) continue;                 // 专辑没了就不对外暴露
+      out[id] = {
+        path: typeof v.path === 'string' && v.path ? v.path : '/',
+        file: typeof v.file === 'string' && v.file ? v.file : null,
+        updatedAt: Number(v.updatedAt) || 0,
+      };
+    }
+    return out;
+  }
+
+  setView(albumId, patch = {}) {
+    if (!albumId || !this.findAlbum(albumId)) return null;
+    const prev = this.views[albumId] && typeof this.views[albumId] === 'object' ? this.views[albumId] : {};
+    const next = {
+      path: typeof patch.path === 'string' && patch.path ? patch.path : (prev.path || '/'),
+      file: patch.file === undefined ? (prev.file || null)
+        : (typeof patch.file === 'string' && patch.file ? patch.file : null),
+      updatedAt: Date.now(),
+    };
+    // 没有实质变化就别写盘（目录切换很频繁）
+    if (prev.path === next.path && (prev.file || null) === next.file && prev.updatedAt) return next;
+    this.views[albumId] = next;
+    this.saveViews();
+    return next;
+  }
+
+  clearView(albumId) {
+    if (!albumId || !this.views[albumId]) return false;
+    delete this.views[albumId];
+    this.saveViews();
+    return true;
+  }
+
+  // 清掉"专辑已经不存在"的孤儿条目（专辑被手工删过 / 从备份恢复过）
+  pruneViews() {
+    let removed = 0;
+    for (const id of Object.keys(this.views || {})) {
+      if (!this.findAlbum(id)) { delete this.views[id]; removed++; }
+    }
+    if (removed > 0) this.saveViews();
+    return removed;
+  }
 
   // ---- albums -------------------------------------------------------------
   static sanitize(input, existing) {
@@ -241,6 +297,7 @@ class Store {
     if (idx === -1) throw Object.assign(new Error('专辑不存在：' + id), { status: 404 });
     this.albums.splice(idx, 1);
     this.saveAlbums();
+    this.clearView(id);          // 顺手清掉"上次浏览到哪"，不留孤儿条目
     return true;
   }
 

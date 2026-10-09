@@ -754,3 +754,15 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; colo
   font-variant-numeric: tabular-nums;
   flex: 0 0 auto;
 }
+
+/* 「上次」标记：这个专辑上次播的就是这个文件 */
+.last-badge {
+  margin-left: 6px;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  font-size: 11px;
+  color: var(--text-dim);
+  background: var(--bg-3);
+  flex: 0 0 auto;
+}

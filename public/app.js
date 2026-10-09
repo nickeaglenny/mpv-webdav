@@ -22,6 +22,7 @@ var API = {
   player:   '/api/player',
   events:   '/api/events',
   settings: '/api/settings',
+  views:    '/api/views',
   resume:   '/api/resume'
 };
 
@@ -60,13 +61,15 @@ var state = {
     error: null,
     entries: [],
     parent: null,
-    token: 0                 /* 防止过期请求覆盖新结果 */
+    token: 0,                /* 防止过期请求覆盖新结果 */
+    restored: false          /* 这次浏览是否来自上次保存的目录 */
   },
   ui: { view: 'list', sortKey: 'name', sortDir: 'asc' },
   search: '',
   selIndex: -1,
   subCache: {},              /* path -> [字幕文件名] */
   resume: null,              /* 最近一次播放进度（只记一条） */
+  views: {},                 /* albumId -> {path, file}：上次浏览到哪 / 上次播了哪个 */
   sse: null,
   sseOpen: false,
   polling: false,
@@ -285,6 +288,7 @@ function apiDeleteAlbum(id) { return api('DELETE', API.albums + '/' + encodeURIC
 function apiTestAlbum(payload) { return api('POST', API.albums + '/test', payload); }
 function apiPlay(payload) { return api('POST', API.play, payload); }
 function apiSaveSettings(partial) { return api('PUT', API.settings, partial); }
+function apiSaveView(albumId, payload) { return api('PUT', API.views + '/' + encodeURIComponent(albumId), payload); }
 function apiGetResume() { return api('GET', API.resume); }
 
 /** 重新读取「最近一次播放进度」（quiet=true 时不弹错误提示）。 */
@@ -423,8 +427,11 @@ function selectAlbum(id) {
   state.selectedAlbumId = id;
   saveUiPrefs();
   renderAlbums();
-  var startPath = album.root ? album.root : '/';
+  /* 优先回到这个专辑"上次浏览到的目录"（存在 data/state/views.json，条数有界） */
+  var view = state.views && state.views[id];
+  var startPath = (view && view.path) ? view.path : (album.root ? album.root : '/');
   if (!startPath || startPath.charAt(0) !== '/') startPath = '/' + startPath;
+  state.browse.restored = !!(view && view.path && view.path !== (album.root || '/'));
   loadBrowse(id, startPath);
 }
 
@@ -531,6 +538,14 @@ function subBadgeHtml(entry) {
   return '<span class="sub-badge" data-act="subs" title="' + esc(tip) + '">字幕 ×' + esc(n) + '</span>';
 }
 
+/* 这个条目是不是"该专辑上次播的那个文件"（存在 data/state/views.json） */
+function lastPlayedBadgeHtml(entry) {
+  if (!entry || entry.isDir) return '';
+  var view = state.views && state.views[state.browse.albumId];
+  if (!view || !view.file || view.file !== entry.path) return '';
+  return '<span class="last-badge" title="这个专辑上次播的就是它">上次</span>';
+}
+
 /* 播放进度：mpv 记的"看到哪了" + 我们缓存的时长 → 一条小进度条。
    只知道已看时间、不知道总时长时，退化成文字（已看 12:34），不给假比例。 */
 function progressHtml(entry) {
@@ -595,7 +610,7 @@ function renderListing() {
         '<div class="card-icon ic-' + esc(kind) + '">' + (ICONS[kind] || ICONS.other) + '</div>' +
         '<div class="card-name">' + esc(e.name) + '</div>' +
         '<div class="card-meta">' + (e.isDir ? '<span class="kind-badge kind-dir">文件夹</span>'
-                                              : esc(fmtSize(e.size))) + subBadgeHtml(e) + progressHtml(e) + '</div>' +
+                                              : esc(fmtSize(e.size))) + subBadgeHtml(e) + lastPlayedBadgeHtml(e) + progressHtml(e) + '</div>' +
         '</div>';
     }).join('');
     box.innerHTML = '<div class="grid">' + cards + '</div>';
@@ -611,7 +626,7 @@ function renderListing() {
     return '<div class="row' + (e.isDir ? ' is-dir' : '') + (i === state.selIndex ? ' is-selected' : '') + '"' +
       ' data-i="' + i + '" data-path="' + esc(e.path) + '" data-kind="' + esc(kind) + '" title="' + esc(e.name) + '">' +
       '<div class="col-name">' + entryIconHtml(e) +
-        '<span class="entry-name">' + esc(e.name) + '</span>' + subBadgeHtml(e) + progressHtml(e) + '</div>' +
+        '<span class="entry-name">' + esc(e.name) + '</span>' + subBadgeHtml(e) + lastPlayedBadgeHtml(e) + progressHtml(e) + '</div>' +
       '<div class="col-size">' + (e.isDir ? '—' : esc(fmtSize(e.size))) + '</div>' +
       '<div class="col-mtime">' + esc(fmtDate(e.mtime)) + '</div>' +
       '<div>' + kindBadgeHtml(e) + '</div>' +
@@ -708,16 +723,46 @@ function loadBrowse(albumId, path) {
     state.browse.entries = Array.isArray(res.entries) ? res.entries : [];
     state.browse.parent = res.parent === undefined ? null : res.parent;
     if (typeof res.path === 'string' && res.path) state.browse.path = res.path;
+    state.browse.restored = false;
     setStatus('已加载 ' + state.browse.entries.length + ' 个条目', 'ok');
+    rememberView(albumId, state.browse.path);      // 记下"这个专辑上次浏览到哪"
     renderBrowser();
   }).catch(function (err) {
     if (token !== state.browse.token) return;
     state.browse.loading = false;
+    /* 上次浏览的目录可能已经被删/改名：退回专辑根目录再试一次，并把那条记录清掉 */
+    if (state.browse.restored) {
+      var album = albumById(albumId);
+      var root = (album && album.root) ? album.root : '/';
+      if (root.charAt(0) !== '/') root = '/' + root;
+      state.browse.restored = false;
+      delete (state.views || {})[albumId];
+      toast('info', '上次浏览的目录已不可用，已回到专辑根目录');
+      loadBrowse(albumId, root);
+      return;
+    }
     state.browse.error = err.message;
     state.browse.entries = [];
     setStatus('目录加载失败：' + err.message, 'error');
     renderBrowser();
   });
+}
+
+/** 上报"这个专辑上次浏览到哪"（节流：连续翻目录时只写最后一次） */
+var viewTimer = null;
+function rememberView(albumId, path) {
+  if (!albumId || !path) return;
+  state.views = state.views || {};
+  var prev = state.views[albumId] || {};
+  if (prev.path === path) return;
+  state.views[albumId] = { path: path, file: prev.file || null, updatedAt: Date.now() };
+  if (viewTimer) window.clearTimeout(viewTimer);
+  viewTimer = window.setTimeout(function () {
+    viewTimer = null;
+    apiSaveView(albumId, { path: path }).catch(function (err) {
+      console.warn('记录浏览位置失败：', err && err.message);
+    });
+  }, 800);
 }
 
 function reloadBrowse() {
@@ -796,6 +841,11 @@ function playEntry(entry, mode, opts) {
     resume: options.resume === false ? false : undefined
   }).then(function (res) {
     if (res.player) applyPlayer(res.player);
+    if (state.browse.albumId) {
+      state.views = state.views || {};
+      var pv = state.views[state.browse.albumId] || { path: state.browse.path, file: null };
+      state.views[state.browse.albumId] = { path: pv.path, file: entry.path, updatedAt: Date.now() };
+    }
     var subs = Array.isArray(res.subtitles) ? res.subtitles : [];
     state.subCache[entry.path] = subs;
     renderListing();
@@ -1394,6 +1444,7 @@ function refreshState() {
     state.albums = Array.isArray(data.albums) ? data.albums : [];
     state.settings = data.settings || state.settings;
     state.resume = data.resume || null;
+    state.views = data.views && typeof data.views === 'object' ? data.views : (state.views || {});
     state.bootError = null;
     $('#boot-error').classList.add('hidden');
     $('#app').classList.remove('hidden');
