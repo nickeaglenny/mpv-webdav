@@ -539,6 +539,28 @@ function readLog(file) {
     r = await api('PUT', '/api/settings', { mpvOntop: true, mpvAutoFullscreen: false });
     check('设置可以复原', !!(r.json && r.json.settings.mpvOntop === true && r.json.settings.mpvAutoFullscreen === false));
 
+    // --- data/ 目录结构：配置在根目录、状态在 state/、缓存在 cache/
+    const dataFiles = (function walk(dir, base) {
+      const out = [];
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        const p = path.join(dir, e.name);
+        const rel = (base ? base + '/' : '') + e.name;
+        if (e.isDirectory()) out.push(...walk(p, rel)); else out.push(rel);
+      }
+      return out;
+    })(dataDir, '');
+    check('data 根目录只有配置类文件（没有零散状态文件）',
+      dataFiles.filter((f) => !f.includes('/')).every((f) => /^(albums|settings)\.json(\.bak)?$/.test(f)),
+      dataFiles.filter((f) => !f.includes('/')).join(', '));
+    check('没有遗留的 last-played.json（已迁移到 state/）',
+      !fs.existsSync(path.join(dataDir, 'last-played.json')));
+    check('state/ 与 cache/ 已就绪',
+      fs.existsSync(path.join(dataDir, 'state')) && fs.existsSync(path.join(dataDir, 'cache')));
+    check('固定令牌文件已生成', fs.existsSync(path.join(dataDir, 'state', 'instance.json')));
+    const instOnDisk = JSON.parse(fs.readFileSync(path.join(dataDir, 'state', 'instance.json'), 'utf8'));
+    check('令牌与本次运行使用的一致（重启后 URL 不变）',
+      instOnDisk.streamToken === state0.streamToken, instOnDisk.streamToken);
+
     // --- 优雅退出接口（托盘「退出」/脚本停止服务用）——放在最后，因为它会真的关掉服务
     r = await api('POST', '/api/shutdown', { token: 'wrong-token' });
     check('shutdown 接口拒绝错误 token', r.status === 403, `status=${r.status}`);

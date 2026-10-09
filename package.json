@@ -14,6 +14,7 @@
     "test": "node tools/e2e-test.js",
     "test:store": "node tools/store-test.js",
     "test:resume": "node tools/resume-test.js",
+    "test:state": "node tools/state-test.js",
     "test:encoding": "node tools/encoding-test.js",
     "test:ipc": "node tools/e2e-test.js --require-ipc",
     "test:ui": "node tools/ui-test.js",

@@ -350,23 +350,28 @@ $p='start.bat'; [IO.File]::WriteAllText($p, ([IO.File]::ReadAllText($p) -replace
 
 ## 9. 数据文件与备份
 
-**`data/` 是你的数据目录，不要删。**
+**`data/` 是你的数据目录，不要删。** 里面分三类，越用越不会乱：
 
-| 文件 | 内容 |
-| --- | --- |
-| `data/albums.json` | 你建的所有专辑（**密码是明文**，因为服务要用它登录 WebDAV） |
-| `data/albums.json.bak` | 上一次保存前的自动备份 |
-| `data/settings.json`（+`.bak`） | 设置项 |
-| `data/last-played.json` | 最近一次的播放进度（只有一条，可随时删） |
+| 路径 | 类别 | 能删吗 | 内容 |
+| --- | --- | --- | --- |
+| `data/albums.json`（+`.bak`） | 配置 | **不能删** | 你建的所有专辑（**密码是明文**，因为服务要用它登录 WebDAV） |
+| `data/settings.json`（+`.bak`） | 配置 | **不能删** | 设置项 |
+| `data/state/recent.json` | 状态 | 能删（只丢"继续观看"提示） | 最近一次的播放进度快照（恒定一条） |
+| `data/state/instance.json` | 状态 | 建议别删 | 固定的流地址令牌；删了会重新生成（旧进度会失联） |
+| `data/state/views.json` | 状态 | 能删 | 每个专辑最后浏览的目录（后续版本使用） |
+| `data/cache/` | 缓存 | **随便删** | mpv 自己的进度文件等 |
+
+规则：**任何要落盘的东西只能放进这三类之一，并且必须有上限或清理方式**；`data/` 根目录只放配置文件。
 
 - 每次保存前，程序会先把现有文件另存为 `.bak`；
 - 启动时如果 `albums.json` **被删掉或写坏了**，会自动从 `.bak` 恢复并在控制台提示，恢复后重建主文件；
 - 所以最坏情况下你只会丢掉"最后一次修改"，不会丢掉整个专辑列表；
-- 想手动兜底的话，直接复制一份 `data\albums.json` 到别处即可（`node tools\store-test.js` 可以验证上面这些行为）。
+- 旧版本的 `data/last-played.json` 会在启动时**自动迁移**到 `data/state/recent.json` 并删除旧文件；如果旧文件已经损坏，会**原样**挪到 `data/state/recent.json.corrupt`（绝不悄悄丢弃）；
+- 想手动兜底的话，直接复制一份 `data\albums.json` 到别处即可（`node tools\store-test.js` 与 `node tools\state-test.js` 可以验证上面这些行为）。
 
 ## 10. 安全与隐私
 
 - 服务**只监听 `127.0.0.1`**，局域网内其它机器访问不到。
-- 流代理地址带一次性随机 token（进程重启即失效），防止本机其它页面顺手读取你的 NAS 内容。
+- 流代理地址带一个**固定的**令牌（存在 `data/state/instance.json`，首次启动生成、之后不变）。它**不是**安全边界（本机进程本就能调用本机接口），作用是不让浏览器里其它网页顺手读取你的 NAS 内容；把令牌固定下来是为了让 mpv 的播放进度记录能长期有效——进度是按流地址记录的，**换端口或删掉 `instance.json` 会让已有进度失联**。
 - 专辑密码以**明文**保存在 `data\albums.json`（仅本机），因为服务需要用它去登录 WebDAV；接口不会把密码回传给前端。若要更保险，请给 `data` 目录设置好本机访问权限，或使用 WebDAV 的只读专用账号。
 - 建议使用 HTTPS 的 WebDAV 地址，避免密码明文过网。

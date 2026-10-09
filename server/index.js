@@ -26,10 +26,12 @@ const OPEN_BROWSER = (process.env.MPV_WEBDAV_OPEN === '1' || ARGS.includes('--op
   && !ARGS.includes('--no-browser')
   && process.env.MPV_WEBDAV_NO_BROWSER !== '1';
 const HOST = '127.0.0.1';
-const TOKEN = crypto.randomBytes(16).toString('hex');
 const VERSION = '1.0.0';
 
 const store = new Store(DATA_DIR, path.join(ROOT, 'mpv', 'mpv.exe'));
+// 流地址令牌固定保存在 data/state/instance.json：重启后 URL 不变。
+// mpv 的进度文件是以流地址为键的，地址稳定是「让 mpv 自己记进度」的前提。
+const TOKEN = store.getOrCreateInstance().streamToken;
 const mpv = new MpvController({ store });
 
 const sseClients = new Set();
@@ -692,11 +694,12 @@ server.on('error', (err) => {
 server.listen(PORT, HOST, async () => {
   const version = await mpvVersion();
   const found = store.settings.mpvPath && fs.existsSync(store.settings.mpvPath);
+  store.setLastPort(PORT);
   console.log('');
   console.log('  mpv-webdav v' + VERSION);
   console.log('  ────────────────────────────────────────────');
   console.log('  控制台:   http://' + HOST + ':' + PORT + '/');
-  console.log('  数据目录: ' + DATA_DIR);
+  console.log('  数据目录: ' + DATA_DIR + '   (state/ 状态文件有界 · cache/ 可随手删)');
   console.log('  专辑:     ' + store.albums.length + ' 个' +
     (store.albums.length ? '（' + store.albums.map((a) => a.name).join('、') + '）' : '（还没有专辑，点右上角「+ 新建专辑」）'));
   console.log('  mpv:      ' + (found ? store.settings.mpvPath + (version ? '  (v' + version + ')' : '') : '未找到，请在设置里指定'));

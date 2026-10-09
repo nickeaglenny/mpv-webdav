@@ -48,6 +48,7 @@ jobs:
           node tools/encoding-test.js
           node tools/store-test.js
           node tools/resume-test.js
+          node tools/state-test.js
 
       # 完整端到端（tools/e2e-test.js）需要真实 mpv.exe，
       # UI 测试（tools/ui-test.js）需要 Chromium，两者默认不在 CI 里跑：

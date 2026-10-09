@@ -66,8 +66,8 @@ fs.mkdirSync(WORK, { recursive: true });
 const s1 = new Store(WORK, 'mpv.exe');
 check('初始没有续播记录', s1.getResume() === null);
 s1.setResume(rec);
-check('写入后生成 last-played.json', fs.existsSync(path.join(WORK, 'last-played.json')));
-const size1 = fs.statSync(path.join(WORK, 'last-played.json')).size;
+check('写入后生成 state/recent.json', fs.existsSync(path.join(WORK, 'state', 'recent.json')));
+const size1 = fs.statSync(path.join(WORK, 'state', 'recent.json')).size;
 check('记录体积很小（< 400 字节）', size1 < 400, size1 + ' 字节');
 
 const s2 = new Store(WORK, 'mpv.exe');
@@ -76,19 +76,25 @@ check('重启后能读回记录', !!s2.getResume() && s2.getResume().pos === 754
 // 覆盖写入应产生备份（复用 store 的写前备份机制）
 const rec2 = Object.assign({}, rec, { pos: 800, updatedAt: 1780000001000 });
 s2.setResume(rec2);
-check('覆盖写入产生 .bak', fs.existsSync(path.join(WORK, 'last-played.json.bak')));
+check('覆盖写入产生 .bak', fs.existsSync(path.join(WORK, 'state', 'recent.json.bak')));
 check('文件恒定只有一处记录（不随观看次数增长）',
-  (() => { const j = JSON.parse(fs.readFileSync(path.join(WORK, 'last-played.json'), 'utf8')); return !Array.isArray(j) && j.pos === 800; })());
+  (() => { const j = JSON.parse(fs.readFileSync(path.join(WORK, 'state', 'recent.json'), 'utf8')); return !Array.isArray(j) && j.pos === 800; })());
 
 s2.clearResume();
 check('清除后记录为 null', s2.getResume() === null);
 const s3 = new Store(WORK, 'mpv.exe');
 check('重启后依然是 null（清除已落盘）', s3.getResume() === null);
 
-// 损坏恢复：主文件写坏时应能从 .bak 恢复
-fs.writeFileSync(path.join(WORK, 'last-played.json'), '{ 坏掉的 JSON', 'utf8');
+// 损坏 / 缺失时：当作"没有进度"，绝不从 .bak 里复活一个已经失效的位置
+fs.writeFileSync(path.join(WORK, 'state', 'recent.json'), '{ 坏掉的 JSON', 'utf8');
 const s4 = new Store(WORK, 'mpv.exe');
-check('记录文件损坏时能从 .bak 恢复', !!s4.getResume(), JSON.stringify(s4.getResume()));
+check('记录文件损坏时按"没有进度"处理（不复活旧备份）', s4.getResume() === null,
+  JSON.stringify(s4.getResume()));
+
+fs.rmSync(path.join(WORK, 'state', 'recent.json'), { force: true });
+const s5 = new Store(WORK, 'mpv.exe');
+check('记录文件被删掉时也是"没有进度"（即使 .bak 还在）', s5.getResume() === null,
+  JSON.stringify(s5.getResume()));
 
 fs.rmSync(WORK, { recursive: true, force: true });
 
