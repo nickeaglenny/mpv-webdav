@@ -569,6 +569,18 @@ class Cdp {
     check('点「取消」可以关闭对话框',
       await cdp.eval('document.querySelector("#dlg-album").classList.contains("hidden")'));
 
+    // --- 关掉标签页再打开（等价于页面重新加载）：开机自动恢复的那张专辑也要回到上次浏览的目录
+    // （回归：以前只有"点击切换"的专辑会恢复，最后开着的那张会掉回专辑根目录）
+    await cdp.eval(`selectAlbum(${JSON.stringify(album.id)})`);         // 先确保当前是这张专辑
+    await cdp.eval(`loadBrowse(${JSON.stringify(album.id)}, '/电影')`);  // 停留在「电影」
+    await cdp.waitFor('Array.from(document.querySelectorAll("#listing [data-path]")).some(function (n) { return n.getAttribute("title") === "测试影片.mkv"; })', 15000, '重新加载前先进入电影目录');
+    await sleep(1500);                                                   // 等浏览位置上（800ms 节流）
+    await cdp.send('Page.reload', { ignoreCache: true });
+    await cdp.waitFor('document.querySelector("#app") && !document.querySelector("#app").classList.contains("hidden")', 25000, '重新加载后界面就绪');
+    await cdp.waitFor('Array.from(document.querySelectorAll("#listing [data-path]")).some(function (n) { return n.getAttribute("title") === "测试影片.mkv"; })', 25000, '重新加载后回到电影目录');
+    const crumbReload = await cdp.eval('document.querySelector("#breadcrumb").textContent.trim()');
+    check('重新打开标签页仍回到上次浏览的目录', /电影/.test(crumbReload), crumbReload);
+
     check('页面无 JS 报错', consoleErrors.length === 0, consoleErrors.slice(0, 5).join(' || '));
 
     const appLog = fs.existsSync(path.join(WORK, 'app.log')) ? fs.readFileSync(path.join(WORK, 'app.log'), 'utf8') : '';

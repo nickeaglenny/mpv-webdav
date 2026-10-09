@@ -361,6 +361,18 @@ function albumRoot() {
   return r.replace(/\/+$/, '') || '/';
 }
 
+/** 这个专辑应该从哪个目录开始浏览：优先"上次浏览到的目录"，否则专辑根目录。
+    （开机自动恢复的那张专辑和点击切换的专辑都要走这里，否则会出现"只有最后那张回到根目录"） */
+function albumStartPath(albumId) {
+  var album = albumById(albumId);
+  var root = (album && album.root) ? String(album.root) : '/';
+  if (root.charAt(0) !== '/') root = '/' + root;
+  var view = state.views && state.views[albumId];
+  var path = (view && view.path) ? String(view.path) : root;
+  if (path.charAt(0) !== '/') path = '/' + path;
+  return { path: path, root: root, restored: !!(view && view.path && view.path !== root) };
+}
+
 function renderAlbums() {
   var box = $('#album-list');
   if (!box) return;
@@ -428,11 +440,9 @@ function selectAlbum(id) {
   saveUiPrefs();
   renderAlbums();
   /* 优先回到这个专辑"上次浏览到的目录"（存在 data/state/views.json，条数有界） */
-  var view = state.views && state.views[id];
-  var startPath = (view && view.path) ? view.path : (album.root ? album.root : '/');
-  if (!startPath || startPath.charAt(0) !== '/') startPath = '/' + startPath;
-  state.browse.restored = !!(view && view.path && view.path !== (album.root || '/'));
-  loadBrowse(id, startPath);
+  var start = albumStartPath(id);
+  state.browse.restored = start.restored;
+  loadBrowse(id, start.path);
 }
 
 /** 侧边栏「测试连接」：直接调用 /api/albums/test。 */
@@ -1458,10 +1468,11 @@ function refreshState() {
     renderToolbar();
 
     if (state.selectedAlbumId && state.browse.albumId !== state.selectedAlbumId) {
-      var album = albumById(state.selectedAlbumId);
-      var p = album && album.root ? album.root : '/';
-      if (p.charAt(0) !== '/') p = '/' + p;
-      loadBrowse(state.selectedAlbumId, p);
+      /* 开机自动恢复的这张专辑也要回到"上次浏览的目录"，不能直接用 album.root
+         （否则会出现：只有"关标签时所在的那张专辑"回到根目录，其它专辑记忆正常） */
+      var start = albumStartPath(state.selectedAlbumId);
+      state.browse.restored = start.restored;
+      loadBrowse(state.selectedAlbumId, start.path);
     } else if (!state.browse.albumId) {
       renderBrowser();
     }
