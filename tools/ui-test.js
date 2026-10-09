@@ -412,20 +412,18 @@ class Cdp {
       check('点「继续观看」后从上次位置接着播', typeof pos === 'number' && pos >= rec.pos - 1.5,
         `position=${pos} 期望≈${rec.pos}`);
 
-      // 空格必须是"暂停"，即使焦点停在播放类按钮上（回归：曾会再点一次按钮 → 重新加载并续播）
-      await cdp.eval('document.querySelector("#btn-play-all").focus()');
+      // 网页不再做播放遥控：焦点在列表上时按空格，不该影响 mpv 的播放
+      await cdp.eval('document.querySelector("#listing").focus()');
       const beforeSpace = (await httpJson(`http://127.0.0.1:${APP_PORT}/api/player`)).json.player;
+      await sleep(900);                                   // 让进度自然推进一点
       await cdp.pressKey(' ', 'Space', 32);
-      await sleep(1200);
+      await sleep(900);
       const afterSpace = (await httpJson(`http://127.0.0.1:${APP_PORT}/api/player`)).json.player;
-      check('焦点在播放按钮上时，空格仍然是"暂停"', afterSpace.paused === true, `paused=${afterSpace.paused}`);
-      check('按空格没有重新加载文件（进度没归零）',
-        afterSpace.path === beforeSpace.path && afterSpace.position >= beforeSpace.position - 0.5,
-        `position=${afterSpace.position} 之前=${beforeSpace.position} path=${afterSpace.path}`);
-      await cdp.pressKey(' ', 'Space', 32);      // 再按一次恢复播放
-      await sleep(600);
-      const resumed = (await httpJson(`http://127.0.0.1:${APP_PORT}/api/player`)).json.player;
-      check('再按一次空格恢复播放', resumed.paused === false, `paused=${resumed.paused}`);
+      check('网页里按空格不再控制 mpv（没暂停、没重新加载、进度继续走）',
+        afterSpace.paused === false
+        && afterSpace.path === beforeSpace.path
+        && afterSpace.position > beforeSpace.position,
+        `paused=${afterSpace.paused} pos ${beforeSpace.position} → ${afterSpace.position}`);
 
       await httpPost(`http://127.0.0.1:${APP_PORT}/api/player`, { action: 'stop' });
       await sleep(500);

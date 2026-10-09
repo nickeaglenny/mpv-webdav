@@ -284,7 +284,6 @@ function apiUpdateAlbum(id, payload) { return api('PUT', API.albums + '/' + enco
 function apiDeleteAlbum(id) { return api('DELETE', API.albums + '/' + encodeURIComponent(id)); }
 function apiTestAlbum(payload) { return api('POST', API.albums + '/test', payload); }
 function apiPlay(payload) { return api('POST', API.play, payload); }
-function apiPlayer(payload) { return api('POST', API.player, payload); }
 function apiSaveSettings(partial) { return api('PUT', API.settings, partial); }
 function apiGetResume() { return api('GET', API.resume); }
 function apiClearResume() { return api('DELETE', API.resume); }
@@ -795,11 +794,11 @@ function playResume() {
   var rec = state.resume;
   if (!entry || !rec) return;
   var p = state.player || {};
-  /* 已经是当前这个文件（暂停中或正在播）：「继续观看」只负责让它继续播，
-     不要重新加载文件——重载会让进度先归零、再由 mpv 续播，看起来像"跳了一下" */
+  /* 已经是当前这个文件：「继续观看」什么都不做，更不会重新加载。
+     （重载会让进度先归零、再由 mpv 续播，看起来像"跳了一下"；
+       要暂停/继续请直接在 mpv 窗口里操作） */
   if (p.albumId === rec.albumId && p.path === rec.path && !p.idle) {
-    if (p.paused) sendPlayerAction('toggle');
-    else toast('info', '正在播放这个文件');
+    toast('info', '正在播放这个文件');
     return;
   }
   if (state.browse.albumId !== rec.albumId) {
@@ -1134,17 +1133,8 @@ function renderTabTitle() {
   if (document.title !== next) document.title = next;
 }
 
-function sendPlayerAction(action, value) {
-  var body = { action: action };
-  if (value !== undefined) body.value = value;
-  return apiPlayer(body).then(function (res) {
-    if (res.player) applyPlayer(res.player);
-    return res;
-  }).catch(function (err) {
-    toast('error', '播放器操作失败：' + err.message);
-    setStatus('播放器操作失败：' + err.message, 'error');
-  });
-}
+/* 网页不再有任何"控制 mpv"的入口：暂停/进度/音量/切集都在 mpv 窗口里。
+   前端只从 SSE/Poll 读取播放状态，用于标签页标题显示。 */
 
 
 /* ============================ 9. SSE 与轮询 ============================ */
@@ -1545,24 +1535,15 @@ function bindKeyboard() {
 
     if (isTypingTarget(ev.target)) return;
 
-    var dialogOpen = !$('#dlg-album').classList.contains('hidden')
-      || !$('#dlg-settings').classList.contains('hidden');
-
-    /* 空格永远是"播放/暂停"，不落到按钮上。
-       否则：焦点还停在「继续观看 / 播放全部 / 行的 ▶」这类按钮上时（鼠标点过就会留在那儿），
-       按空格 = 又点了一次那个按钮 → 重新加载文件 → 进度看起来跳回起点后又被续播。 */
-    if ((ev.key === ' ' || ev.code === 'Space') && isPlayerActive()) {
-      ev.preventDefault();
-      if (!dialogOpen) sendPlayerAction('toggle');
-      return;
-    }
+    /* 网页不做播放遥控：暂停 / 进度 / 音量都在 mpv 窗口里操作。
+       这里只保留"浏览"相关的快捷键（/ 搜索、回车进入、上下选择）。 */
 
     /* 焦点在按钮 / 链接上时交给浏览器原生行为（空格点击、回车激活） */
     var tag = ev.target && ev.target.tagName ? ev.target.tagName.toLowerCase() : '';
     if (tag === 'button' || tag === 'a') return;
 
     /* 对话框打开时不再处理下面的全局快捷键 */
-    if (dialogOpen) return;
+    if (!$('#dlg-album').classList.contains('hidden') || !$('#dlg-settings').classList.contains('hidden')) return;
 
     if (ev.key === '/') {
       ev.preventDefault();
