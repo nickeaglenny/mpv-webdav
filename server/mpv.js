@@ -308,15 +308,31 @@ class MpvController extends EventEmitter {
   // 把键盘焦点交给 mpv 的窗口。
   // 为什么不用 SetForegroundWindow / AppActivate：从后台进程（我们的 Node）抢焦点会被 Windows 拒绝
   // （实测 AppActivate 无效）；而"让 mpv 把自己的窗口最小化再立刻还原"是**它激活自己的窗口**，
-  // 系统一定允许（实测有效，0ms 间隔即可，闪烁几乎看不到）。
+  // 系统一定允许（实测有效）。
+  // 注意：不能"发完就不管"——真实播放时窗口是带着文件刚建出来的，mpv 有时来不及处理还原命令，
+  // 结果窗口就停在最小化（实测踩到过）。所以这里每一步都读回真实状态，没还原就再来一次。
   async focusWindow() {
     if (this.mode !== 'ipc' || !this.ipc || !this.ipc.connected) return false;
     if (this.store.settings.mpvFocusOnPlay === false) return false;
     if (!this.state.running || this.state.idle) return false;
+    const readMinimized = async () => {
+      try {
+        return await this.ipc.send(['get_property', 'window-minimized']);
+      } catch {
+        return null;                    // 没有窗口（例如 --vo=null）：当作无需还原
+      }
+    };
     try {
-      await this.ipc.send(['set_property', 'window-minimized', true]);
-      await this.ipc.send(['set_property', 'window-minimized', false]);
-      return true;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        await this.ipc.send(['set_property', 'window-minimized', true]).catch(() => {});
+        await sleep(attempt === 0 ? 220 : 350);
+        await this.ipc.send(['set_property', 'window-minimized', false]).catch(() => {});
+        await sleep(260);
+        const stillMinimized = await readMinimized();
+        if (stillMinimized !== true) return true;
+      }
+      console.warn('[mpv] 窗口没能还原（焦点可能没抢到）；可以在设置里关掉“开始播放时把焦点交给 mpv”');
+      return false;
     } catch {
       return false;
     }
