@@ -306,15 +306,75 @@ class MpvController extends EventEmitter {
   }
 
   // 把键盘焦点交给 mpv 的窗口。
-  // 为什么不用 SetForegroundWindow / AppActivate：从后台进程（我们的 Node）抢焦点会被 Windows 拒绝
-  // （实测 AppActivate 无效）；而"让 mpv 把自己的窗口最小化再立刻还原"是**它激活自己的窗口**，
-  // 系统一定允许（实测有效）。
-  // 注意：不能"发完就不管"——真实播放时窗口是带着文件刚建出来的，mpv 有时来不及处理还原命令，
-  // 结果窗口就停在最小化（实测踩到过）。所以这里每一步都读回真实状态，没还原就再来一次。
-  async focusWindow() {
-    if (this.mode !== 'ipc' || !this.ipc || !this.ipc.connected) return false;
-    if (this.store.settings.mpvFocusOnPlay === false) return false;
-    if (!this.state.running || this.state.idle) return false;
+  //
+  // 背景（都是真机对照实测）：置顶只决定窗口层级，键盘输入跟着"焦点"走；
+  // 从后台进程抢焦点会被 Windows 的前台锁定拒绝：
+  //   · AllowSetForegroundWindow(mpvPid) → 返回 False（它要求调用者自己就是前台进程，
+  //     而前台是用户的浏览器，不是我们，所以这条路在本项目里走不通）
+  //   · 单独 AppActivate / SetForegroundWindow → 无效（前台窗口不变）
+  // 可用的办法有两个，优先用不闪屏的：
+  //   ① focus-mpv.vbs：先模拟敲一下 ALT 破限，再 AppActivate（约 45ms，不闪屏）
+  //   ② 让 mpv 自己把窗口"最小化 → 立刻还原"（mpv 激活自己的窗口系统一定允许，会闪一下）
+  focusWindow() {
+    if (this.store.settings.mpvFocusOnPlay === false) return Promise.resolve(false);
+    if (this.mode !== 'ipc' || !this.ipc || !this.ipc.connected) return Promise.resolve(false);
+    if (!this.state.running || this.state.idle) return Promise.resolve(false);
+    if (!this._expectsWindow()) return Promise.resolve(false);   // 无窗口（--vo=null 等）就别白起助手进程
+    const pid = this.child && this.child.pid;
+    return this._focusViaHelper(pid).then((ok) => {
+      if (ok) {
+        console.log('[mpv] 焦点已交给 mpv 窗口（focus-mpv.ps1，不闪屏）');
+        return true;
+      }
+      console.log('[mpv] focus-mpv.ps1 未成功，改用「最小化→还原」要焦点');
+      return this._focusViaMinimize();
+    });
+  }
+
+  // 这次启动的 mpv 到底有没有窗口？（--vo=null / --force-window=no 时没有，直接跳过要焦点）
+  _expectsWindow() {
+    const args = this.lastArgs || [];
+    if (args.includes('--vo=null')) return false;
+    const fw = args.find((a) => a.startsWith('--force-window='));
+    if (fw && /=(no|0)$/.test(fw)) return false;
+    return true;
+  }
+
+  // ① 用 focus-mpv.ps1（ALT 破限 + SetForegroundWindow + 自己校验前台窗口）
+  //    优先 pwsh（启动快），没有就退回系统自带的 powershell.exe
+  _focusViaHelper(pid) {
+    const script = path.join(__dirname, '..', 'focus-mpv.ps1');
+    if (!pid || !fs.existsSync(script)) return Promise.resolve(false);
+    const shells = ['pwsh', 'powershell'];
+    const tryShell = (idx) => {
+      if (idx >= shells.length) return Promise.resolve(false);
+      const exe = shells[idx];
+      return new Promise((resolve) => {
+        let child;
+        try {
+          // stdio 用 ignore：受限环境里管道会 EPERM，这里也本来不需要读它的输出
+          child = spawn(exe, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, String(pid)],
+            { stdio: 'ignore', windowsHide: true });
+        } catch {
+          return resolve(false);
+        }
+        const timer = setTimeout(() => { try { child.kill(); } catch { /* ignore */ } resolve(false); }, 5000);
+        child.on('error', () => { clearTimeout(timer); resolve(false); });
+        child.on('exit', (code) => {
+          clearTimeout(timer);
+          if (code === 0) return resolve(true);
+          resolve(tryShell(idx + 1));            // 这个 shell 没成，换下一个再试
+        });
+      });
+    };
+    return tryShell(0);
+  }
+
+  // ② 退路：让 mpv 自己最小化再还原。
+  //    不能"发完就不管"——真实播放时窗口是带着文件刚建出来的，mpv 有时来不及处理还原命令，
+  //    结果窗口就停在最小化（实测踩到过）。所以每一步都读回真实状态，没还原就重试。
+  async _focusViaMinimize() {
+    if (!this.ipc || !this.ipc.connected) return false;
     const readMinimized = async () => {
       try {
         return await this.ipc.send(['get_property', 'window-minimized']);
@@ -331,7 +391,7 @@ class MpvController extends EventEmitter {
         const stillMinimized = await readMinimized();
         if (stillMinimized !== true) return true;
       }
-      console.warn('[mpv] 窗口没能还原（焦点可能没抢到）；可以在设置里关掉“开始播放时把焦点交给 mpv”');
+      console.warn('[mpv] 没能把焦点交给 mpv 窗口；可以在设置里关掉“开始播放时把焦点交给 mpv”');
       return false;
     } catch {
       return false;
@@ -392,7 +452,9 @@ class MpvController extends EventEmitter {
         return null;
       }
 
-      const child = spawn(this.mpvPath(), [...this.baseArgs(), `--input-ipc-server=${this.pipePath}`], {
+      const mpvArgs = [...this.baseArgs(), `--input-ipc-server=${this.pipePath}`];
+      this.lastArgs = mpvArgs;
+      const child = spawn(this.mpvPath(), mpvArgs, {
         stdio: 'ignore',
         windowsHide: false,
       });
