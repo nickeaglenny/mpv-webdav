@@ -19,6 +19,7 @@
     "test:encoding": "node tools/encoding-test.js",
     "test:ipc": "node tools/e2e-test.js --require-ipc",
     "test:ui": "node tools/ui-test.js",
+    "test:http": "node tools/http-test.js",
     "live-check": "node tools/live-check.js",
     "probe:ipc": "node tools/probe-ipc.js",
     "testdata": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/make-testdata.ps1",

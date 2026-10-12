@@ -24,6 +24,7 @@ tools/.lnktest/
 tools/.shot/
 tools/.rendercheck/
 tools/.storetest/
+tools/.httptest/
 
 # 测试素材整个目录都是生成的（npm run testdata 一键重建），不进仓库
 # —— 生成的样片、以及配套的 .srt/.ass/.txt 小文件都在里面

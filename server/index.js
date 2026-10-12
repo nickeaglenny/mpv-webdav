@@ -235,6 +235,43 @@ function safeEqual(a, b) {
   return crypto.timingSafeEqual(ba, bb);
 }
 
+// ------------------------------------------------------------ 本机来源校验 ---
+// 服务只监听 127.0.0.1，但"端口在本机"≠"只有本机页面能调用"：
+//   · DNS rebinding：恶意站点把自己的域名解析到 127.0.0.1，就能以同源身份读写本接口；
+//   · CSRF：其它网页可以用"简单请求"（text/plain 也能带 JSON 体）POST 到本接口，
+//     建/改/删专辑、改设置、触发播放。而 readBody 不校验 Content-Type，拦不住。
+// 所以在路由入口统一校验：Host 必须是本机地址，带 Origin 的请求必须同源，跨站请求直接拒绝。
+// 返回 null 表示放行，否则返回可读的拒绝原因。
+const LOCAL_HOSTNAMES = new Set(['127.0.0.1', 'localhost', '[::1]']);
+
+function localRequestProblem(req) {
+  const rawHost = String(req.headers.host || '').trim();
+  if (!rawHost) return '缺少 Host 头';
+  const hostMatch = /^(\[[^\]]*\]|[^:]*)(?::(\d+))?$/.exec(rawHost);
+  const hostname = String(hostMatch ? hostMatch[1] : rawHost).toLowerCase();
+  const hostPort = hostMatch && hostMatch[2] ? hostMatch[2] : '';
+  if (!LOCAL_HOSTNAMES.has(hostname)) return '只允许通过本机地址访问（Host: ' + rawHost + '）';
+  if (hostPort && hostPort !== String(PORT)) return '端口与本服务不一致（Host: ' + rawHost + '）';
+
+  const site = req.headers['sec-fetch-site'];
+  if (site === 'cross-site') return '拒绝跨站请求';
+
+  const origin = req.headers.origin;
+  if (origin != null && origin !== '' && origin !== 'null') {
+    let parsed;
+    try {
+      parsed = new URL(origin);
+    } catch {
+      return '来源地址不是合法 URL（Origin: ' + origin + '）';
+    }
+    const originPort = parsed.port || (parsed.protocol === 'https:' ? '443' : '80');
+    if (!LOCAL_HOSTNAMES.has(parsed.hostname.toLowerCase()) || originPort !== String(PORT)) {
+      return '拒绝跨站来源（Origin: ' + origin + '）';
+    }
+  }
+  return null;
+}
+
 function readBody(req, limit = 4 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -338,42 +375,54 @@ async function subtitleContext(client, settings, dirPath) {
   return { entries, subLists };
 }
 
-// 在已有目录清单里给某个文件挑字幕（纯计算，不联网）
-function subtitlesFor(context, settings, fileName) {
+// 字幕匹配的唯一实现：列表里的「字幕 ×N」和播放时真正挂上的字幕都走这里，
+// 免得两处规则各写一遍、日后漂移（列表显示有字幕、播放却一条都没挂）。
+// 纯计算、不联网：
+//   entries  ：文件所在目录的条目
+//   subLists ：字幕子目录的条目；只是"列目录算个数"时传空数组，省掉额外请求
+// 返回按分值排序、最多 16 条（和真正交给 mpv 的条数一致）。
+function pickSubtitles(entries, subLists, settings, fileName) {
+  const subExts = settings.subExts || [];
+  const allSubFiles = (list, penalty) => list
+    .filter((e) => !e.isDir && subExts.includes(media.extOf(e.name)))
+    .map((s) => ({ name: s.name, path: s.path, score: 40 - penalty }));
+
   const found = new Map();
 
   const add = (list, penalty) => {
     for (const m of list) {
+      const score = m.score - penalty;
       const prev = found.get(m.path);
-      if (!prev || prev.score < m.score - penalty) {
-        found.set(m.path, { name: m.name, path: m.path, score: m.score - penalty });
+      if (!prev || prev.score < score) {
+        found.set(m.path, { name: m.name, path: m.path, score });
       }
     }
   };
-  const allSubFiles = (list) => list
-    .filter((e) => !e.isDir && (settings.subExts || []).includes(media.extOf(e.name)))
-    .map((s) => ({ name: s.name, path: s.path, score: 40 }));
 
-  const named = media.findSubtitlesIn(context.entries, fileName, settings.subExts, settings.slang);
+  const named = media.findSubtitlesIn(entries, fileName, subExts, settings.slang);
   add(named, 0);
 
-  // 文件名规则没命中时，若这个目录里只有一个视频，目录里的字幕就归它
-  if (!named.length && settings.subFallbackSingleVideo !== false) {
-    const fb = media.singleVideoFallback(context.entries, settings);
-    if (fb && fb.video.name === fileName) add(allSubFiles(context.entries), 0);
-  }
+  // 文件名规则没命中时，若这个目录里只有一个视频，目录里的字幕就归它。
+  // 只在开头算一次（原来每个字幕子目录里都重算一遍，结果一样但白算）。
+  const fallback = (!named.length && settings.subFallbackSingleVideo !== false)
+    ? media.singleVideoFallback(entries, settings)
+    : null;
+  const fallbackHit = !!(fallback && fallback.video.name === fileName);
+  if (fallbackHit) add(allSubFiles(entries, 0), 0);
 
-  for (const subEntries of context.subLists) {
-    add(media.findSubtitlesIn(subEntries, fileName, settings.subExts, settings.slang), 5);
-    if (!named.length && settings.subFallbackSingleVideo !== false) {
-      const fb = media.singleVideoFallback(context.entries, settings);
-      if (fb && fb.video.name === fileName) add(allSubFiles(subEntries), 5);
-    }
+  for (const subEntries of subLists || []) {
+    add(media.findSubtitlesIn(subEntries, fileName, subExts, settings.slang), 5);
+    if (fallbackHit) add(allSubFiles(subEntries, 5), 5);
   }
 
   return Array.from(found.values())
     .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name))
     .slice(0, 16);
+}
+
+// 在已列好的目录清单里给某个文件挑字幕
+function subtitlesFor(context, settings, fileName) {
+  return pickSubtitles(context.entries, context.subLists, settings, fileName);
 }
 
 // 单个文件的字幕（保持原有行为）
@@ -391,16 +440,12 @@ async function handleBrowse(query) {
   const { entries } = await client.propfind(rel, 1);
   const settings = store.settings;
 
-  const subExts = settings.subExts;
   const mapped = entries.map((e) => {
     const kind = media.kindOf(e.name, e.isDir, settings);
     const base = { name: e.name, path: e.path, isDir: e.isDir, size: e.size, mtime: e.mtime, ext: media.extOf(e.name), kind };
     if (kind === 'video') {
-      base.subtitleCount = media.findSubtitlesIn(entries, e.name, subExts, settings.slang).length;
-      if (!base.subtitleCount && settings.subFallbackSingleVideo !== false) {
-        const fb = media.singleVideoFallback(entries, settings);
-        if (fb && fb.video.name === e.name) base.subtitleCount = fb.subs.length;
-      }
+      // 与播放时真正会挂上的字幕同一个函数（这里不列字幕子目录，省掉额外联网请求）
+      base.subtitleCount = pickSubtitles(entries, [], settings, e.name).length;
     }
     return base;
   });
@@ -419,6 +464,31 @@ async function handleBrowse(query) {
   if (probeWanted.length) queueDurationProbe(probeWanted);
 
   return { ok: true, albumId: album.id, path: rel, parent: rel === '/' ? null : rel.replace(/\/[^/]*$/, '') || '/', entries: mapped };
+}
+
+// 只要进度、不要目录：播放结束后界面刷新进度条用它。
+// 完全读本机缓存（watch-later + durations），一次 WebDAV 请求都不发 —— 这是它相对
+// 「再调一次 /api/browse」的意义：不必为了几条进度条重新 PROPFIND 整个目录、重算字幕。
+async function handleProgress(body) {
+  const album = store.findAlbum(body && body.albumId);
+  if (!album) throw Object.assign(new Error('专辑不存在或已被删除'), { status: 404 });
+  const asked = Array.isArray(body.paths) ? body.paths.slice(0, 2000) : [];
+
+  const posMap = new Map(watchlater.scan(WL_DIR).map((e) => [e.key, e]));
+  const progress = {};
+  const probeWanted = [];
+  for (const raw of asked) {
+    const rel = normalizeRel(raw);
+    if (rel === '/') continue;
+    const key = watchlater.keyFor(streamUrl(album.id, rel));
+    const found = watchlater.progressFor(posMap.get(key), durations[key]);
+    if (!found) continue;
+    progress[rel] = found;
+    if (!found.dur) probeWanted.push({ albumId: album.id, path: rel });
+  }
+  if (probeWanted.length) queueDurationProbe(probeWanted);
+
+  return { ok: true, albumId: album.id, progress };
 }
 
 async function handleTest(body) {
@@ -659,9 +729,12 @@ const MIME = {
 
 function serveStatic(req, res, pathname) {
   let rel = pathname === '/' ? 'index.html' : decodeURIComponent(pathname).replace(/^\/+/, '');
-  const target = path.resolve(PUBLIC_DIR, rel);
-  if (!target.startsWith(path.resolve(PUBLIC_DIR))) {
-    res.writeHead(403);
+  const publicRoot = path.resolve(PUBLIC_DIR);
+  const target = path.resolve(publicRoot, rel);
+  // 用 path.relative 判越界：startsWith 会把同前缀的兄弟目录（如 public-old）误判成"在目录内"
+  const relToRoot = path.relative(publicRoot, target);
+  if (relToRoot.startsWith('..') || path.isAbsolute(relToRoot)) {
+    res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
     return res.end('forbidden');
   }
   fs.stat(target, (err, st) => {
@@ -683,6 +756,10 @@ function serveStatic(req, res, pathname) {
 async function route(req, res, parsed) {
   const { pathname, searchParams: query } = parsed;
   const method = req.method.toUpperCase();
+
+  // 所有入口（含 mpv 抓取的 /stream）都先过一遍本机来源校验，见 localRequestProblem()
+  const rejected = localRequestProblem(req);
+  if (rejected) return sendJson(res, 403, { ok: false, error: rejected });
 
   // ---- SSE
   if (pathname === '/api/events' && method === 'GET') {
@@ -792,6 +869,12 @@ async function route(req, res, parsed) {
       albumId: query.get('albumId'),
       path: query.get('path') || '/',
     }));
+  }
+
+  // ---- progress（只读本机缓存，不碰 WebDAV）
+  if (pathname === '/api/progress' && method === 'POST') {
+    const body = await readBody(req);
+    return sendJson(res, 200, await handleProgress(body));
   }
 
   // ---- play

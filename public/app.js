@@ -22,6 +22,7 @@ var API = {
   player:   '/api/player',
   events:   '/api/events',
   settings: '/api/settings',
+  progress: '/api/progress',
   views:    '/api/views',
   resume:   '/api/resume'
 };
@@ -287,6 +288,8 @@ function apiUpdateAlbum(id, payload) { return api('PUT', API.albums + '/' + enco
 function apiDeleteAlbum(id) { return api('DELETE', API.albums + '/' + encodeURIComponent(id)); }
 function apiTestAlbum(payload) { return api('POST', API.albums + '/test', payload); }
 function apiPlay(payload) { return api('POST', API.play, payload); }
+/** 只按需查这几个路径的播放进度（服务端只读本机缓存，不碰 WebDAV） */
+function apiProgress(albumId, paths) { return api('POST', API.progress, { albumId: albumId, paths: paths }); }
 function apiSaveSettings(partial) { return api('PUT', API.settings, partial); }
 function apiSaveView(albumId, payload) { return api('PUT', API.views + '/' + encodeURIComponent(albumId), payload); }
 function apiGetResume() { return api('GET', API.resume); }
@@ -1077,23 +1080,29 @@ function applyPlayer(ps) {
   if (ps.error) setStatus('播放器错误：' + ps.error, 'error');
 }
 
-/** 只刷新当前目录里各条目的播放进度（不重新加载目录、不动选中项与搜索框） */
+/**
+ * 只刷新当前目录里各条目的播放进度（不重新加载目录、不动选中项与搜索框）。
+ * 走 /api/progress：服务端只读本机缓存就够，不必为了几条进度条再 PROPFIND 整个目录。
+ */
 function refreshProgress() {
   if (!state.browse.albumId || state.browse.loading) return Promise.resolve();
   var albumId = state.browse.albumId;
   var path = state.browse.path;
-  return apiBrowse(albumId, path).then(function (res) {
+  var entries = state.browse.entries;
+  var paths = entries.filter(canPlay).map(function (e) { return e.path; });
+  if (!paths.length) return Promise.resolve();
+
+  return apiProgress(albumId, paths).then(function (res) {
     if (state.browse.albumId !== albumId || state.browse.path !== path) return;   /* 已经翻到别处了 */
-    var fresh = {};
-    (Array.isArray(res.entries) ? res.entries : []).forEach(function (e) { fresh[e.path] = e; });
+    var fresh = (res && res.progress) || {};
     var changed = false;
-    state.browse.entries.forEach(function (e) {
-      var now = fresh[e.path];
-      if (!now) return;
-      var before = JSON.stringify(e.progress || null);
-      var after = JSON.stringify(now.progress || null);
-      if (before !== after) { e.progress = now.progress; changed = true; }
-      if (e.subtitleCount !== now.subtitleCount) { e.subtitleCount = now.subtitleCount; changed = true; }
+    entries.forEach(function (e) {
+      if (!canPlay(e)) return;
+      var now = fresh[e.path] || null;      /* 没有进度 = 显式清掉，避免残留旧进度条 */
+      if (JSON.stringify(e.progress || null) !== JSON.stringify(now)) {
+        e.progress = now;
+        changed = true;
+      }
     });
     if (changed) renderListing();
   }).catch(function () { /* 只是刷新进度，失败就静默 */ });

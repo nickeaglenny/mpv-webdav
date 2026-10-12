@@ -436,6 +436,11 @@ function readLog(file) {
       check('列表进度：自动补探到总时长（进度条有比例）',
         !!(ep3 && ep3.progress && ep3.progress.dur > 0 && ep3.progress.ratio > 0),
         ep3 && ep3.progress ? `pos=${ep3.progress.pos} dur=${ep3.progress.dur} ${ep3.progress.percent}%` : '没有 progress');
+      // 播放结束后界面用的是这个接口（只读本机缓存，不重新列目录），读到的必须是同一份进度
+      const pr = await api('POST', '/api/progress', { albumId: album.id, paths: [probeRel, '/剧集/穹庐下的魔女 第01集.mp4'] });
+      check('POST /api/progress 读到同一份进度',
+        !!(pr.json && pr.json.progress && pr.json.progress[probeRel] && pr.json.progress[probeRel].pos === 5),
+        JSON.stringify(pr.json && pr.json.progress));
       await sleep(2200);   // 时长缓存是延迟落盘的（1.5 秒防抖）
       check('时长缓存写在 cache/durations.json', fs.existsSync(path.join(dataDir, 'cache', 'durations.json')));
       check('没有进度的文件不会凭空显示进度条', !!plain && plain.progress === undefined,
