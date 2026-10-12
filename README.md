@@ -235,6 +235,9 @@ pwsh -NoProfile -File .\tools\autostart.ps1 -Uninstall   # 取消
 - **为什么要本地流代理**：mpv 直接播 WebDAV URL 会遇到「认证方式不统一、中文路径编码、需要自定义请求头」等问题。
   服务端统一处理认证并把字节流转给 mpv，mpv 只看见 `http://127.0.0.1:8787/stream/<一次性token>/...`，
   并且完整支持 HTTP `Range`（拖动进度条不会重新下载）。
+- **刷新进度不用重新列目录**：播放结束后界面只调 `POST /api/progress`（把当前目录里的文件路径报上来），
+  服务端直接读本机的 `data/cache/`（mpv 的 watch-later + 时长缓存）就够，**一次 WebDAV 请求都不发**；
+  进度条不必再靠"重 PROPFIND 整个目录"来更新。
 - **两种播放通道**（自动选择，日志里会说明）：
   1. **IPC 模式（默认）**：常驻一个 mpv，用命名管道传 JSON 命令 → 支持播放列表、暂停/继续、拖动进度、音量、上一首/下一首，进度实时回显到网页。
   2. **回退模式**：命名管道不可用时（例如某些受限沙箱），改为每次点播启动一个 mpv 进程。
@@ -312,6 +315,9 @@ node tools\resume-test.js
 
 :: data/ 目录结构、旧文件搬迁、固定令牌、进度上限（不需要 mpv）
 node tools\state-test.js
+
+:: HTTP 层：本机来源校验（Host / Origin）+ 进度接口不碰 WebDAV（不需要 mpv 与浏览器）
+node tools\http-test.js
 
 :: 字幕编码：单元测试 + 对着真实服务器查某个字幕文件的编码
 node tools\encoding-test.js
@@ -420,6 +426,9 @@ $p='start.bat'; [IO.File]::WriteAllText($p, ([IO.File]::ReadAllText($p) -replace
 ## 10. 安全与隐私
 
 - 服务**只监听 `127.0.0.1`**，局域网内其它机器访问不到。
+- 每个请求还会校验 **Host / Origin**：Host 必须是 `127.0.0.1` / `localhost` 且端口与本服务一致；
+  带 `Origin` 的跨站请求、以及 `Sec-Fetch-Site: cross-site` 一律 403。这样即便浏览器里开着别的网页，
+  它也没法偷偷调用本机接口（CSRF），把域名解析到 `127.0.0.1` 的 **DNS rebinding** 同样进不来。
 - 流代理地址带一个**固定的**令牌（存在 `data/state/instance.json`，首次启动生成、之后不变）。它**不是**安全边界（本机进程本就能调用本机接口），作用是不让浏览器里其它网页顺手读取你的 NAS 内容；把令牌固定下来是为了让 mpv 的播放进度记录能长期有效——进度是按流地址记录的，**换端口或删掉 `instance.json` 会让已有进度失联**。
 - 专辑密码以**明文**保存在 `data\albums.json`（仅本机），因为服务需要用它去登录 WebDAV；接口不会把密码回传给前端。若要更保险，请给 `data` 目录设置好本机访问权限，或使用 WebDAV 的只读专用账号。
 - 建议使用 HTTPS 的 WebDAV 地址，避免密码明文过网。
