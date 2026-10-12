@@ -58,10 +58,16 @@ function getFreePort() {
 
 function startNode(script, args, env, logFile) {
   const fd = fs.openSync(logFile, 'a');
-  return spawn(process.execPath, [script, ...args], {
-    stdio: ['ignore', fd, fd],
-    env: Object.assign({}, process.env, env || {}),
-  });
+  try {
+    return spawn(process.execPath, [script, ...args], {
+      stdio: ['ignore', fd, fd],
+      env: Object.assign({}, process.env, env || {}),
+    });
+  } finally {
+    // 子进程已经拿到自己的句柄副本；父进程这份必须还回去。
+    // 否则父进程一直持有日志文件，Windows 上连临时目录都删不掉（ENOTEMPTY）。
+    try { fs.closeSync(fd); } catch { /* ignore */ }
+  }
 }
 
 class Cdp {
