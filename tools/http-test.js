@@ -94,11 +94,24 @@ const postJson = (port, p, obj, extra) => raw(port, {
     MPV_WEBDAV_DATA: DATA,
   }, LOG);
 
-  const cleanup = () => {
+  // 收尾：等子进程真正退出，再删临时目录。
+  // Windows 上进程刚被杀掉时文件可能还被占着，所以 rmSync 带重试；
+  // 而且清理失败绝不能让测试自己崩掉（tools/.httptest 只是个可随手删的临时目录）。
+  const stopAll = async () => {
     try { app.kill(); } catch { /* ignore */ }
+    if (app.exitCode === null && app.signalCode === null) {
+      await Promise.race([new Promise((resolve) => app.once('exit', resolve)), sleep(3000)]);
+    }
     try { dav.server.close(); } catch { /* ignore */ }
   };
-  process.on('exit', cleanup);
+  const removeWork = () => {
+    try {
+      fs.rmSync(WORK, { recursive: true, force: true, maxRetries: 10, retryDelay: 150 });
+    } catch (err) {
+      console.warn('清理 tools/.httptest 失败（不影响测试结论）：' + err.message);
+    }
+  };
+  process.on('exit', () => { try { app.kill(); } catch { /* ignore */ } });
 
   try {
     check('应用服务器已启动', await waitForPort(APP_PORT));
@@ -180,10 +193,12 @@ const postJson = (port, p, obj, extra) => raw(port, {
     // ---------------- 静态目录穿越 ----------------
     r = await raw(APP_PORT, { path: '/..%2fserver%2findex.js' });
     check('静态目录穿越被拦截', r.status !== 200 || !r.text.includes('require('), `status=${r.status}`);
+  } catch (err) {
+    // 断言里访问了不存在的字段之类的问题，也要报成一条 FAIL，而不是甩一堆堆栈、退出码 1
+    check('HTTP 测试未抛出异常', false, err && err.message ? err.message : String(err));
   } finally {
-    cleanup();
-    await sleep(120);
-    fs.rmSync(WORK, { recursive: true, force: true });
+    await stopAll();
+    removeWork();
   }
 
   process.exit(summary());
