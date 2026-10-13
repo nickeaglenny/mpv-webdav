@@ -217,13 +217,13 @@ class WebDAVClient {
   // Like send(), but follows redirects, answers digest challenges and (optionally)
   // hands back a live stream instead of a buffered body.
   async perform(method, url, opts = {}) {
-    const { body = null, headers = {}, streamed = false, redirects = 5 } = opts;
+    const { body = null, headers = {}, streamed = false, streaming = false, redirects = 5 } = opts;
     let currentUrl = url;
     let triedDigest = false;
 
     for (let attempt = 0; attempt <= redirects + 1; attempt++) {
       const res = streamed
-        ? await this.sendStreamed(method, currentUrl, { headers, body })
+        ? await this.sendStreamed(method, currentUrl, { headers, body, streaming })
         : await this.send(method, currentUrl, { headers, body, wantBuffer: true });
 
       if ([301, 302, 303, 307, 308].includes(res.status) && res.headers.location) {
@@ -257,7 +257,7 @@ class WebDAVClient {
   }
 
   // Streaming variant of send(): resolves once the response headers are available.
-  sendStreamed(method, url, { headers = {}, body = null } = {}) {
+  sendStreamed(method, url, { headers = {}, body = null, streaming = false } = {}) {
     return new Promise((resolve, reject) => {
       const u = new URL(url);
       const mod = u.protocol === 'https:' ? https : http;
@@ -273,6 +273,13 @@ class WebDAVClient {
         headers: reqHeaders,
         rejectUnauthorized: this.album.verifyTLS === false ? false : undefined,
       }, (res) => {
+        // 响应头已经到达，接下来这条连接要长时间搬字节（/stream 代理）。
+        // 这里必须把 socket 空闲超时关掉：mpv 暂停播 / 缓存写满时会正常地停止读取，
+        // 代理随之背压、上游 socket 变空闲 —— 这不是故障。以前这里沿用
+        // album.timeoutMs（默认 20 秒）的空闲超时，会把好好的流 destroy 掉，
+        // mpv 把截断当成「文件放完」于是跳到下一集（见 README 常见问题）。
+        // 真正的卡死交给上层的看门狗 + 断点续传（server/index.js handleStream）。
+        if (streaming) req.setTimeout(0);
         resolve({
           status: res.statusCode,
           headers: res.headers,
@@ -280,6 +287,7 @@ class WebDAVClient {
           abort: () => req.destroy(),
         });
       });
+      // 只约束「连上并把响应头拿回来」这一段；拿到头之后（streaming）上面会关掉。
       req.setTimeout(this.album.timeoutMs || 20000, () => {
         req.destroy(new WebDAVError('请求超时', 0));
       });
@@ -371,11 +379,12 @@ class WebDAVClient {
   }
 
   // Range-capable GET (or HEAD) for the local stream proxy.
-  async open(rel, { method = 'GET', range = null, ifRange = null } = {}) {
+  //   streaming = true：body 阶段不要空闲超时（长连接搬字节，见 sendStreamed 的注释）
+  async open(rel, { method = 'GET', range = null, ifRange = null, streaming = false } = {}) {
     const headers = { Accept: '*/*', Connection: 'keep-alive' };
     if (range) headers.Range = range;
     if (ifRange) headers['If-Range'] = ifRange;
-    const res = await this.perform(method, this.urlFor(rel), { headers, streamed: true });
+    const res = await this.perform(method, this.urlFor(rel), { headers, streamed: true, streaming });
     return res;
   }
 }

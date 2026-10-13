@@ -617,6 +617,8 @@ class MpvController extends EventEmitter {
       case 'end-file':
         if (msg.reason === 'error') {
           this.setError('mpv 无法播放该文件（格式不支持或网络错误）');
+        } else if (msg.reason === 'eof') {
+          this._reportPrematureEof();
         }
         break;
       case 'idle':
@@ -628,6 +630,25 @@ class MpvController extends EventEmitter {
         break;
     }
     this.emitState();
+  }
+
+  // mpv 把「上游字节流被提前切断」当成正常放完（实测：end-file reason=eof、error=none，
+  // -v 日志里也没有任何提示），于是静默跳到播放列表的下一集。这里用「结束位置 vs 总时长」
+  // 把它认出来，至少给用户一句明确的说法。
+  // 真断流现在由 /stream 代理做断点续传兜住（server/index.js），这条是万一没兜住时的提示。
+  _reportPrematureEof() {
+    const s = this.state;
+    const dur = Number(s.duration) || 0;
+    const pos = Number(s.position) || 0;
+    if (dur <= 0) return;                                     // 不知道总时长就不猜
+    if (pos >= dur - Math.max(10, dur * 0.02)) return;         // 片尾/时长不准，差得不多就不报
+    // 用户自己用 --length 限制时长时，「提前 EOF」是预期的
+    const args = (this.store && this.store.settings && this.store.settings.extraMpvArgs) || [];
+    if (args.some((line) => /(^|\s)--length(=|\s)/.test(String(line)))) return;
+    const text = `播放中断：${s.mediaTitle || s.path || '当前文件'} 只放到 `
+      + `${watchlater.formatClock(pos)}/${watchlater.formatClock(dur)}（上游数据流提前结束，已跳到下一集）`;
+    this.emit('log', { level: 'warn', message: text });
+    console.warn('[mpv] ' + text);
   }
 
   _applyPath(url) {

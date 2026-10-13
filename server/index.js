@@ -681,10 +681,14 @@ async function handleStream(req, res, query, token, albumId, relPath) {
     }
   }
 
+  const method = req.method === 'HEAD' ? 'HEAD' : 'GET';
+  const clientRange = req.headers.range || null;
+  // streaming：拿到响应头之后不要再做 socket 空闲超时（见 server/webdav.js）。
   const upstream = await client.open(rel, {
-    method: req.method === 'HEAD' ? 'HEAD' : 'GET',
-    range: req.headers.range || null,
+    method,
+    range: clientRange,
     ifRange: req.headers['if-range'] || null,
+    streaming: method === 'GET',
   });
 
   const status = upstream.status || 200;
@@ -703,16 +707,175 @@ async function handleStream(req, res, query, token, albumId, relPath) {
   headers['Cache-Control'] = 'no-store';
 
   res.writeHead(status, headers);
-  if (req.method === 'HEAD') {
+  if (method === 'HEAD') {
     if (upstream.stream) upstream.stream.destroy();
     return res.end();
   }
 
-  upstream.stream.on('error', () => { try { res.destroy(); } catch {} });
+  // 从这里开始是「真的在搬字节」：断了就断点续传，别让 mpv 看到提前结束的流。
+  const name = decodeURIComponent((rel.split('/').pop() || rel));
+  const span = responseSpan(status, upstream.headers, clientRange);
+  const stallMs = album.streamStallMs === undefined ? STREAM_STALL_MS : album.streamStallMs;
+  const resumeMax = album.streamResumeMax === undefined ? STREAM_RESUME_MAX : album.streamResumeMax;
+  // 上游换了文件时（ETag/Last-Modified 变了）续传会拿到 200 而不是 206，我们据此放弃，而不是拼错字节
+  const validator = upstream.headers['etag'] || upstream.headers['last-modified'] || null;
+
+  let current = upstream;
+  let sent = 0;        // 这一条响应已经写给 mpv 的字节数
+  let attempts = 0;    // 已经续传过几次
+  let clientClosed = false;
+  // mpv 断开（换集、退出、拖动进度条）时写 res 会报 EPIPE/ECONNRESET：
+  // 没有监听者的话 Node 会把它当未捕获错误，直接把整个服务干掉。
+  // （以前这里是 upstream.pipe(res)，pipe 自己带了这个监听；现在是自己写，得自己加。）
+  res.on('error', () => { clientClosed = true; });
   res.on('close', () => {
-    if (!res.writableEnded && upstream.stream) upstream.stream.destroy();
+    clientClosed = true;
+    try { if (current.stream) current.stream.destroy(); } catch { /* ignore */ }
   });
-  upstream.stream.pipe(res);
+
+  try {
+    for (;;) {
+      try {
+        await pumpUpstream(current.stream, res, { stallMs, onBytes: (n) => { sent += n; } });
+        break;                                  // 上游把这段字节发完了
+      } catch (err) {
+        // mpv 自己关的（换集、退出、拖动进度条）：正常，不续传
+        if (clientClosed || res.writableEnded || res.destroyed) return;
+        if (!span || attempts >= resumeMax) throw err;
+        const from = span.start + sent;
+        if (span.end != null && from > span.end) break;   // 客户端要的那一段已经发完
+        attempts++;
+        const wait = Math.min(3000, 300 * attempts);
+        const text = `上游数据流中断（${name}：已传 ${sent} 字节 / ${err.message}），`
+          + `${wait}ms 后从第 ${from} 字节续传（第 ${attempts}/${resumeMax} 次）`;
+        mpv.emit('log', { level: 'warn', message: text });
+        console.warn('[stream] ' + text);
+        await sleepMs(wait);
+        if (clientClosed) return;
+        const next = await client.open(rel, {
+          method: 'GET',
+          range: `bytes=${from}-${span.end != null ? span.end : ''}`,
+          ifRange: validator,
+          streaming: true,
+        });
+        if (next.status === 416) {              // 已经到文件末尾
+          if (next.stream) next.stream.destroy();
+          break;
+        }
+        const nextSpan = responseSpan(next.status, next.headers, `bytes=${from}-`);
+        if (!nextSpan || nextSpan.start !== from) {
+          if (next.stream) next.stream.destroy();
+          throw new Error(`上游不支持从断点续传（返回 HTTP ${next.status}）`);
+        }
+        current = next;
+      }
+    }
+    if (!clientClosed && !res.writableEnded) res.end();
+  } catch (err) {
+    if (clientClosed) return;
+    const text = `上游数据流中断且无法续传（${name}，已传 ${sent} 字节）：${err.message}`;
+    mpv.emit('log', { level: 'error', message: text });
+    console.error('[stream] ' + text);
+    try { if (current.stream) current.stream.destroy(); } catch { /* ignore */ }
+    try { res.destroy(); } catch { /* ignore */ }
+  }
+}
+
+// ---- 断点续传所需的小工具 -------------------------------------------------
+//
+// 背景（真机对照实测）：mpv 把「上游字节流被提前切断」当成正常的文件结尾
+// （end-file reason=eof、error=none，连 -v 日志都不报），于是静默跳到播放列表的
+// 下一集 —— 用户看到的就是「看到一半突然跳到下一集」。而这类切断最常见的来源恰好
+// 是「本该没事的空闲」：mpv 暂停 / 缓存写满时停止读取 → 代理背压 → 上游 socket
+// 空闲 → WebDAV 服务器、反向代理或我们自己的超时把长连接掐掉。
+//
+// 所以这里做两件事：① 空闲不再算故障（见 pumpUpstream 的背压处理）；
+// ② 真断了就接着传：mpv 读的是一条连续字节流，在断点重发 Range、把剩余字节写进
+// 同一个响应，它完全无感（最多觉得这一段慢了一点）。
+const STREAM_STALL_MS = 30000;   // 客户端在正常收、上游却这么久没吐字节 → 认定卡死
+const STREAM_RESUME_MAX = 5;     // 最多续传几次
+
+const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// 这次响应覆盖的是文件里的哪一段？（续传要按绝对偏移重发 Range）
+// 返回 null 表示这个上游不能按字节续传（忽略了 Range，或者没给长度）。
+function responseSpan(status, headers, clientRange) {
+  const len = parseInt(headers['content-length'] || '0', 10);
+  if (status === 206) {
+    const m = /bytes\s+(\d+)-(\d+)\/(\d+|\*)/i.exec(String(headers['content-range'] || ''));
+    if (!m) return null;
+    return {
+      start: parseInt(m[1], 10),
+      end: parseInt(m[2], 10),
+      total: m[3] === '*' ? null : parseInt(m[3], 10),
+    };
+  }
+  if (status === 200) {
+    // 200 = 服务器忽略了 Range：只有「本来就从头开始要」时才能自己算断点
+    const m = /bytes=(\d*)-/i.exec(String(clientRange || ''));
+    const asked = m && m[1] ? parseInt(m[1], 10) : 0;
+    if (asked > 0 || !(len > 0)) return null;
+    return { start: 0, end: len - 1, total: len };
+  }
+  return null;
+}
+
+// 把上游的一段字节写给 mpv，直到 end / 出错 / 卡死。
+//   · 带背压：mpv 不读就暂停上游。「上游没数据」这时是正常的（暂停播放/缓存写满），
+//     stallMs 计时会一起停掉，所以暂停播放不会被误判成卡死。
+//   · stallMs > 0 时开看门狗：客户端在正常消耗、上游却 stallMs 没吐一个字节 → 认为断了。
+function pumpUpstream(src, res, { stallMs, onBytes }) {
+  return new Promise((resolve, reject) => {
+    let done = false;
+    let idle = null;
+    let backpressure = false;
+    const clearIdle = () => { if (idle) { clearTimeout(idle); idle = null; } };
+    const finish = (err) => {
+      if (done) return;
+      done = true;
+      clearIdle();
+      src.off('data', onData);
+      src.off('end', onEnd);
+      src.off('error', onError);
+      src.off('aborted', onAborted);
+      src.off('close', onClose);
+      if (err) reject(err); else resolve();
+    };
+    const armIdle = () => {
+      clearIdle();
+      if (!stallMs || done || backpressure) return;
+      idle = setTimeout(() => {
+        const err = new Error(`上游 ${Math.round(stallMs / 1000)}s 没有数据`);
+        try { src.destroy(err); } catch { /* ignore */ }
+        finish(err);
+      }, stallMs);
+    };
+    const onData = (chunk) => {
+      onBytes(chunk.length);
+      if (res.destroyed || res.writableEnded) { finish(new Error('客户端已断开')); return; }
+      if (res.write(chunk)) { armIdle(); return; }
+      backpressure = true;                 // 下游来不及收：别把「等 mpv」算成上游卡死
+      clearIdle();
+      src.pause();
+      res.once('drain', () => {
+        if (done) return;
+        backpressure = false;
+        armIdle();
+        src.resume();
+      });
+    };
+    const onEnd = () => finish(null);
+    const onError = (err) => finish(err || new Error('上游流错误'));
+    const onAborted = () => finish(new Error('上游连接被中断'));
+    const onClose = () => { if (!done) finish(new Error('上游连接提前关闭')); };
+
+    src.on('data', onData);
+    src.on('end', onEnd);
+    src.on('error', onError);
+    src.on('aborted', onAborted);
+    src.on('close', onClose);
+    armIdle();     // 拿到响应头之后、第一个字节到达之前，同样算「在等上游」
+  });
 }
 
 // ------------------------------------------------------------ static files --

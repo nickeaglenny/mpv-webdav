@@ -263,6 +263,13 @@ class Store {
       auth,
       verifyTLS: src.verifyTLS === undefined ? true : !!src.verifyTLS,
       timeoutMs: Math.min(120000, Math.max(3000, parseInt(src.timeoutMs, 10) || 20000)),
+      // 流式播放的两个保险丝（一般不用改；界面上没有，改 data/albums.json 才会生效）：
+      //   streamStallMs  客户端在正常收、上游这么久没吐字节就认定卡死并断点续传（0 = 关掉）
+      //   streamResumeMax  最多续传几次，超过就放弃并把错误写进日志
+      streamStallMs: src.streamStallMs === undefined
+        ? 30000 : Math.min(600000, Math.max(0, parseInt(src.streamStallMs, 10) || 0)),
+      streamResumeMax: src.streamResumeMax === undefined
+        ? 5 : Math.min(50, Math.max(0, parseInt(src.streamResumeMax, 10) || 0)),
       headers,
       createdAt: existing ? existing.createdAt : new Date().toISOString(),
     };

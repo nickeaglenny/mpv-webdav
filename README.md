@@ -319,6 +319,9 @@ node tools\state-test.js
 :: HTTP 层：本机来源校验（Host / Origin）+ 进度接口不碰 WebDAV（不需要 mpv 与浏览器）
 node tools\http-test.js
 
+:: 流代理：中途断流自动续传、暂停读取不误杀上游、卡死看门狗（不需要 mpv 与浏览器）
+node tools\stream-test.js
+
 :: 字幕编码：单元测试 + 对着真实服务器查某个字幕文件的编码
 node tools\encoding-test.js
 node tools\check-encoding.js --url https://nas.example.com:5006/dav --user <用户名> --pass <密码> --path "/影视/电影/xxx.ass"
@@ -353,6 +356,31 @@ node tools\live-check.js --url https://nas.example.com:5006/dav --user <用户�
 1. 看服务端控制台的错误输出；
 2. 有些 WebDAV 服务不支持 `Range` 或对大文件有限制，可在专辑高级里加请求头；
 3. 确认 mpv 能在命令行播放该流：脚本会在 `tools\.e2e\mpv.log` 留下 mpv 自己的日志。
+
+**Q：看到一半突然跳到下一集（进度条还没到头）**
+不是 mpv 崩了，也不是片源坏了：**上游（WebDAV）那条字节流被提前切断，mpv 把它当成"文件放完了"**，
+于是按播放列表顺延到下一集。实测这种情况下 mpv 的 IPC 事件是 `end-file reason=eof`、`error=none`，
+连 `-v` 日志都不报错——所以看起来是"无缘无故"跳的。（另外，真正断开的时刻和你看到跳集的时刻可能差几分钟：
+mpv 会把已缓冲的部分放完，缓存吃到哪就是哪。）
+
+服务端现在有两层处理，正常情况下你已经不需要管它：
+
+1. **流式传输不再把"空闲"当故障**。以前它对上游 socket 用了 `timeoutMs`（默认 20 秒）的空闲超时，
+   而 mpv 暂停播 / 缓存写满时会正常地停止读取 → 代理背压 → 上游 socket 空闲 → 20 秒后连接被 destroy。
+   现在流式请求拿到响应头之后就不再做空闲超时（那段超时只用来约束"连上并拿回响应头"）。
+2. **真断了就断点续传**：在断点重发 `Range: bytes=<已传>-`，把剩余字节接着写进同一个响应，mpv 完全无感。
+   续传和放弃都会在服务端控制台（`[stream] ...`）与网页日志里留一条记录，不再静默。
+
+如果还是跳集，说明上游断得太频繁（重试次数用完就放弃）。去服务端控制台看 `[stream] 上游数据流中断...` 那几行，
+再排查 WebDAV 服务端 / 反向代理的空闲超时（例如 nginx 的 `proxy_read_timeout`）、NAS 休眠、限速或单连接寿命。
+
+**Q：某个专辑的流老是被掐，想调参数**
+`timeoutMs` / `streamStallMs` / `streamResumeMax` 都是**专辑级**字段，界面上没有，要写进 `data/albums.json`
+里对应专辑才生效（注意：之后在界面上编辑保存该专辑，这三个字段会回到默认值）。默认值足够应付绝大多数情况。
+
+- `timeoutMs`（默认 20000，3 秒~120 秒）：只用于"连上 WebDAV 并拿回响应头"，不再管 body 阶段的空闲。
+- `streamStallMs`（默认 30000，0 = 关掉看门狗）：客户端在正常收、上游这么久没吐字节，就认定卡死并续传。
+- `streamResumeMax`（默认 5，0~50）：一次播放最多续传几次，用完就放弃（并在日志里报错）。
 
 **Q：网页显示了「已切换轮询模式」**
 SSE 被浏览器/代理打断，已自动降级为每 2 秒轮询，功能不受影响。
