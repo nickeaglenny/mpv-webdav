@@ -103,6 +103,22 @@ $srt = "1`r`n00:00:00,300 --> 00:00:05,000`r`n第二集的字幕（用于验证�
 [System.IO.File]::WriteAllText((Join-Path $seriesDir '穹庐下的魔女 第02集.chs.srt'), $srt, (New-Object System.Text.UTF8Encoding $false))
 Write-Host '已准备剧集目录: 剧集\穹庐下的魔女 第01..03集.mp4（各 20 秒）+ 第02集字幕'
 
+# ---- 多字幕轨样本：3 条内嵌字幕、**没有语言标记**、第三条被标为 default ----
+# 用来验证"字幕自动选中文"：mpv 的 --slang 在这种文件上完全无效，只会选 default 那条。
+$multi = Join-Path $root '编码测试\多字幕.mkv'
+$t1 = "1`r`n00:00:00,300 --> 00:00:03,000`r`n简体中文（第一条）`r`n"
+$t2 = "1`r`n00:00:00,300 --> 00:00:03,000`r`n繁體中文（第二條）`r`n"
+$t3 = "1`r`n00:00:00,300 --> 00:00:03,000`r`nEnglish (third track)`r`n"
+foreach ($pair in @(@('1', $t1), @('2', $t2), @('3', $t3))) {
+    [System.IO.File]::WriteAllText((Join-Path $root ('编码测试\_sub{0}.srt' -f $pair[0])), $pair[1], (New-Object System.Text.UTF8Encoding $false))
+}
+& $ffmpeg -y -loglevel error -f lavfi -i 'testsrc=size=320x180:rate=10:duration=5' `
+    -i (Join-Path $root '编码测试\_sub1.srt') -i (Join-Path $root '编码测试\_sub2.srt') -i (Join-Path $root '编码测试\_sub3.srt') `
+    -map 0:v -map 1 -map 2 -map 3 -c:v libx264 -preset ultrafast -pix_fmt yuv420p -c:s srt `
+    -metadata:s:s:0 'title=简体中文' -metadata:s:s:1 'title=繁體中文' -metadata:s:s:2 'title=English' `
+    -disposition:s:2 default $multi
+Remove-Item (Join-Path $root '编码测试\_sub*.srt') -Force -ErrorAction SilentlyContinue
+Write-Host '已准备多字幕样本: 编码测试\多字幕.mkv（3 条内嵌字幕，无语言标记，第三条标 default）'
 Write-Host ''
 Get-ChildItem -Recurse -File $root | ForEach-Object {
     '{0,10}  {1}' -f $_.Length, $_.FullName.Substring($root.Length + 1)

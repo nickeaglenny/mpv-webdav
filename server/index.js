@@ -1063,7 +1063,6 @@ async function route(req, res, parsed) {
   if (pathname === '/api/settings' && method === 'PUT') {
     const body = await readBody(req);
     const prevPath = store.settings.mpvPath;
-    const prevOntop = store.settings.mpvOntop;
     const prevFullscreen = store.settings.mpvAutoFullscreen;
     const prevWlEntries = store.settings.watchLaterMaxEntries;
     const prevWlDays = store.settings.watchLaterMaxDays;
@@ -1074,8 +1073,7 @@ async function route(req, res, parsed) {
       pruneWatchLater();
     }
     mpv.state.volume = settings.volume;
-    // 正在播放时改「置顶 / 自动全屏」，立即作用到当前 mpv
-    if (settings.mpvOntop !== prevOntop) mpv.applySettingChange('mpvOntop');
+    // 正在播放时改「自动全屏」，立即作用到当前 mpv
     if (settings.mpvAutoFullscreen !== prevFullscreen) mpv.applySettingChange('mpvAutoFullscreen');
     return sendJson(res, 200, { ok: true, settings });
   }

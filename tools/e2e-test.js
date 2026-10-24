@@ -371,19 +371,20 @@ function readLog(file) {
     // 现在的做法是**重定向**（进度写到我们自己的 cache/watch-later），而不是禁用；
     // 具体断言在下面的 watch-later 段里（不放行 --no-* 参数、目录指向 data/cache/）。
 
-    // --- 播放时的窗口行为（置顶默认开、自动全屏默认关）
-    check('mpv 启动参数带上了置顶/全屏设置',
-      /--ontop=/.test(mpvLog) && /--fullscreen=/.test(mpvLog),
-      (mpvLog.match(/--(?:no-)?ontop=\S+|--(?:no-)?fullscreen=\S+/g) || []).join(' '));
+    // --- 播放时的窗口行为（只按设置决定要不要自动全屏；不再强制置顶）
+    check('mpv 启动参数带上了全屏设置', /--fullscreen=/.test(mpvLog),
+      (mpvLog.match(/--(?:no-)?fullscreen=\S+/g) || []).join(' '));
+    check('mpv 启动参数不再强制置顶（窗口不锁在最前面）', !/--ontop/.test(mpvLog),
+      (mpvLog.match(/--(?:no-)?ontop=\S+/g) || []).join(' '));
     if (playing && playing.mode === 'ipc') {
-      if (typeof playing.ontop === 'boolean') {
-        check('IPC 播放中 mpv 处于置顶状态', playing.ontop === true, 'ontop=' + playing.ontop);
+      if (typeof playing.fullscreen === 'boolean') {
         check('IPC 播放中未自动全屏（默认关闭）', playing.fullscreen === false, 'fullscreen=' + playing.fullscreen);
       } else {
-        console.log('SKIP  置顶/全屏属性（--vo=null 无窗口时 mpv 不提供这些属性；参数下发已在上一条验证）');
+        console.log('SKIP  全屏属性（--vo=null 无窗口时 mpv 不提供；参数下发已在上一条验证）');
       }
+      check('播放器状态里不再有 ontop 字段', playing.ontop === undefined, JSON.stringify(Object.keys(playing).filter((k) => k === 'ontop')));
     } else {
-      check('回退模式按设置传入置顶参数', /--ontop=yes/.test(mpvLog), '--ontop=yes');
+      check('回退模式按设置传入全屏参数', /--fullscreen=no/.test(mpvLog), '--fullscreen=no');
     }
 
     // --- 进度由 mpv 记账（watch-later）
@@ -656,25 +657,58 @@ function readLog(file) {
     r = await api('PUT', '/api/settings', { mpvFocusOnPlay: true });
     check('可以再打开', !!(r.json && r.json.settings && r.json.settings.mpvFocusOnPlay === true));
 
-    // --- 置顶 / 自动全屏 开关（默认：置顶开、全屏关）
-    r = await api('PUT', '/api/settings', { mpvOntop: false, mpvAutoFullscreen: true });
-    check('设置里能关掉置顶、打开自动全屏',
-      !!(r.json && r.json.settings.mpvOntop === false && r.json.settings.mpvAutoFullscreen === true),
-      JSON.stringify(r.json && r.json.settings && { ontop: r.json.settings.mpvOntop, fs: r.json.settings.mpvAutoFullscreen }));
+    // --- 自动全屏 / 字幕优先中文 开关
+    r = await api('PUT', '/api/settings', { mpvAutoFullscreen: true, subtitlesPreferChinese: false });
+    check('设置里能打开自动全屏、关掉"字幕优先中文"',
+      !!(r.json && r.json.settings.mpvAutoFullscreen === true && r.json.settings.subtitlesPreferChinese === false),
+      JSON.stringify(r.json && r.json.settings && { fs: r.json.settings.mpvAutoFullscreen, zh: r.json.settings.subtitlesPreferChinese }));
 
     if (!playing || playing.mode !== 'ipc') {
       // 回退模式每个文件重新起 mpv，参数应当立刻跟着设置变
       await api('POST', '/api/play', { albumId: album.id, path: '/动画/样片二.mp4', mode: 'replace', loadSubs: false });
       await sleep(1500);
       const log2 = readLog(MPV_LOG);
-      check('回退模式：开关变化后 mpv 参数同步变化',
-        /--ontop=no/.test(log2) && /--fullscreen=yes/.test(log2));
+      check('回退模式：开关变化后 mpv 参数同步变化', /--fullscreen=yes/.test(log2));
     } else {
-      console.log('SKIP  回退模式参数同步（IPC 模式是运行时 set_property，由置顶属性断言覆盖）');
+      console.log('SKIP  回退模式参数同步（IPC 模式是运行时 set_property）');
     }
 
-    r = await api('PUT', '/api/settings', { mpvOntop: true, mpvAutoFullscreen: false });
-    check('设置可以复原', !!(r.json && r.json.settings.mpvOntop === true && r.json.settings.mpvAutoFullscreen === false));
+    r = await api('PUT', '/api/settings', { mpvAutoFullscreen: false, subtitlesPreferChinese: true });
+    check('设置可以复原', !!(r.json && r.json.settings.mpvAutoFullscreen === false && r.json.settings.subtitlesPreferChinese === true));
+
+    // --- 字幕自动选中文（真实文件：3 条内嵌字幕、无语言标记、第三条标 default）
+    // mpv 自己的 --slang 在这种文件上完全无效（实测只会选 default 那条），所以由我们加载后挑一次。
+    // 只有 IPC 模式能读到 sid / track-list。
+    if (playing && playing.mode === 'ipc') {
+      const multiSubPath = '/编码测试/多字幕.mkv';
+      await api('PUT', '/api/settings', { subtitlesPreferChinese: true });
+      await api('POST', '/api/play', { albumId: album.id, path: multiSubPath, mode: 'single', loadSubs: false });
+      await sleep(2500);
+      let subState = (await api('GET', '/api/player')).json.player;
+      check('无语言标记时也自动选中中文字幕轨（而不是 default 那条）',
+        subState.sid === 1 && subState.subtitleTracks >= 3,
+        `sid=${subState.sid} tracks=${subState.subtitleTracks}`);
+
+      await api('PUT', '/api/settings', { subtitlesPreferChinese: false });
+      // 先播别的文件：同一个文件重载时 mpv 会沿用上次的字幕轨选择，直接重播看不出差别
+      await api('POST', '/api/play', { albumId: album.id, path: '/电影/测试影片.mkv', mode: 'single', loadSubs: false });
+      await sleep(1500);
+      await api('POST', '/api/play', { albumId: album.id, path: multiSubPath, mode: 'single', loadSubs: false });
+      let offState = null;
+      for (let i = 0; i < 12; i++) {                 // 等文件真正加载出来（多字幕样本只有 5 秒）
+        await sleep(400);
+        offState = (await api('GET', '/api/player')).json.player;
+        if (offState && offState.running && !offState.idle && offState.sid > 0) break;
+      }
+      check('关掉"字幕优先中文"后就按文件里的 default 标记选',
+        !!offState && offState.sid === 3,
+        `sid=${offState && offState.sid} tracks=${offState && offState.subtitleTracks} running=${offState && offState.running} idle=${offState && offState.idle} path=${offState && offState.path}`);
+      await api('PUT', '/api/settings', { subtitlesPreferChinese: true });
+      await api('POST', '/api/player', { action: 'stop' });
+      await sleep(600);
+    } else {
+      console.log('SKIP  字幕自动选中文（回退模式没有 IPC，读不到 sid / track-list）');
+    }
 
     // --- data/ 目录结构：配置在根目录、状态在 state/、缓存在 cache/
     const dataFiles = (function walk(dir, base) {

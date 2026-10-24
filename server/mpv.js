@@ -156,8 +156,9 @@ class MpvController extends EventEmitter {
       subtitleCount: 0,
       subtitles: [],
       subtitleTracks: 0,
+      trackList: [],
+      sid: -1,
       resumedFrom: 0,
-      ontop: false,
       fullscreen: false,
       error: null,
       mode: null,
@@ -237,22 +238,18 @@ class MpvController extends EventEmitter {
     const s = this.store.settings;
     const playing = !!(this.state.running && !this.state.idle);
     if (playing) {
-      if (s.mpvOntop) this.ipc.send(['set_property', 'ontop', true]).catch(() => {});
       if (s.mpvAutoFullscreen) this.ipc.send(['set_property', 'fullscreen', true]).catch(() => {});
     } else {
-      this.ipc.send(['set_property', 'ontop', false]).catch(() => {});
       this.ipc.send(['set_property', 'fullscreen', false]).catch(() => {});
     }
   }
 
-  // 设置里改了「播放时置顶 / 自动全屏」：立刻作用到正在运行的 mpv
+  // 设置里改了「自动全屏」：立刻作用到正在运行的 mpv
   applySettingChange(name) {
     if (this.mode !== 'ipc' || !this.ipc || !this.ipc.connected) return;
     const s = this.store.settings;
     const playing = !!(this.state.running && !this.state.idle);
-    if (name === 'mpvOntop') {
-      this.ipc.send(['set_property', 'ontop', !!(s.mpvOntop && playing)]).catch(() => {});
-    } else if (name === 'mpvAutoFullscreen') {
+    if (name === 'mpvAutoFullscreen') {
       this.ipc.send(['set_property', 'fullscreen', !!(s.mpvAutoFullscreen && playing)]).catch(() => {});
     }
   }
@@ -264,6 +261,36 @@ class MpvController extends EventEmitter {
     const s = this.state;
     return !!(s.running && !s.idle && !s.paused && !s.eof);
   }
+
+  // 文件加载完成后挑一条字幕轨。
+  // 为什么要自己挑：mpv 的 --slang 只按**语言标记**匹配，很多中文影视文件（尤其重编码）
+  // 没有语言标记，这时 mpv 会选"被标为 default 的那条"——经常不是中文。
+  // 实测：3 条字幕、无语言标记、第三条标 default → --slang 怎么配都选第三条。
+  // 所以这里按「语言标记 → 轨道标题 → 顺序」自己挑一次（可用设置关掉）。
+  _pickSubtitleTrackSoon() {
+    if (this.store.settings.subtitlesPreferChinese === false) return;
+    if (!this.ipc || !this.ipc.connected) return;
+    const apply = (attempt) => {
+      if (!this.ipc || !this.ipc.connected) return;
+      const tracks = Array.isArray(this.state.trackList) ? this.state.trackList : [];
+      const best = media.pickSubtitleTrack(tracks);
+      if (best == null) {
+        // track-list 可能还没到，稍后再试一次
+        if (attempt < 2) setTimeout(() => apply(attempt + 1), 250);
+        return;
+      }
+      if (best === this.state.sid) return;
+      this.ipc.send(['set_property', 'sid', best]).then(() => {
+        const track = tracks.find((t) => t && t.id === best);
+        const label = track ? [track.title, track.lang].filter(Boolean).join(' / ') : String(best);
+        console.log(`[mpv] 字幕自动选中文轨：${label || best}`);
+        try { this.emitState(true); } catch { /* ignore */ }
+      }).catch(() => {});
+    };
+    const t = setTimeout(() => apply(0), 250);
+    if (t.unref) t.unref();
+  }
+
 
   // 让 mpv 快速探一个文件的时长（只解码 1 帧就退出）。
   // 输出重定向到临时文件而不是管道：管道在受限环境里会被拒（EPERM），文件不会有这个问题。
@@ -406,9 +433,8 @@ class MpvController extends EventEmitter {
       '--keep-open=no',
       '--idle=yes',
       ...this.watchLaterArgs(),
-      // 启动时（还没开始播）不要置顶也不要全屏：空窗口不该盖住桌面。
-      // 真正开始播放时再用 set_property 打开，见 _syncWindowState()。
-      '--ontop=no',
+      // 启动时（还没开始播）先不要全屏：空窗口不该盖住桌面。
+      // 真正开始播放时再按设置打开，见 _syncWindowState()。
       '--fullscreen=no',
     ];
     if (s.alang) args.push('--alang=' + s.alang);
@@ -426,7 +452,6 @@ class MpvController extends EventEmitter {
       '--keep-open=yes',
       ...this.watchLaterArgs(),
       // 回退模式每个进程就播一个文件，直接按设置给参数
-      '--ontop=' + (s.mpvOntop ? 'yes' : 'no'),
       '--fullscreen=' + (s.mpvAutoFullscreen ? 'yes' : 'no'),
       item.url,
       '--force-media-title=' + (item.title || item.name || ''),
@@ -530,7 +555,7 @@ class MpvController extends EventEmitter {
     const props = [
       'idle-active', 'pause', 'time-pos', 'duration', 'volume', 'mute',
       'media-title', 'path', 'filename', 'playlist', 'playlist-pos', 'playlist-count',
-      'eof-reached', 'keep-open', 'track-list', 'ontop', 'fullscreen',
+      'eof-reached', 'keep-open', 'track-list', 'sid', 'fullscreen',
     ];
     props.forEach((name, i) => {
       ipc.send(['observe_property', i + 1, name]).catch(() => {});
@@ -587,12 +612,11 @@ class MpvController extends EventEmitter {
             this._syncPlaylistFlags();
             break;
           case 'track-list':
-            s.subtitleTracks = Array.isArray(msg.data)
-              ? msg.data.filter((t) => t && t.type === 'sub' && !t.dependent).length
-              : 0;
+            s.trackList = Array.isArray(msg.data) ? msg.data : [];
+            s.subtitleTracks = s.trackList.filter((t) => t && t.type === 'sub' && !t.dependent).length;
             break;
-          case 'ontop':
-            s.ontop = !!msg.data;
+          case 'sid':
+            s.sid = typeof msg.data === 'number' ? msg.data : -1;
             break;
           case 'fullscreen':
             s.fullscreen = !!msg.data;
@@ -613,6 +637,7 @@ class MpvController extends EventEmitter {
         s.idle = false;
         s.error = null;
         this._syncWindowState();
+        this._pickSubtitleTrackSoon();
         break;
       case 'end-file':
         if (msg.reason === 'error') {

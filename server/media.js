@@ -120,6 +120,44 @@ function singleVideoFallback(entries, settings = {}) {
   return { video: videos[0], subs };
 }
 
+// ---- 内嵌字幕轨的自动选择 ---------------------------------------------------
+// 为什么需要自己挑：mpv 的 --slang 只按**语言标记**匹配；很多中文影视文件（尤其重编码）
+// 根本没有语言标记，这时 mpv 会选"文件里被标为 default 的那条"——经常不是中文。
+// 实测：无语言标记 + 第三条标 default → --slang 怎么配都选第三条。
+// 所以在文件加载后自己按「语言标记 → 轨道标题 → 顺序」挑一次。
+const CHINESE_LANG = new Set([
+  'chi', 'zho', 'zh', 'zh-cn', 'zh-tw', 'zh-hk', 'zh-hans', 'zh-hant',
+  'chs', 'cht', 'sc', 'tc', 'cn', 'cmn', 'yue', 'gb', 'big5',
+]);
+const CHINESE_TITLE = /(简体|繁体|简中|繁中|中文|中字|中英|双语|字幕组|chs|cht|zh|cn|sc|tc|gb|big5)/i;
+
+// 单条字幕轨的偏好分（越高越优先）
+function subtitleTrackScore(track, position) {
+  if (!track) return -1;
+  const lang = String(track.lang || '').toLowerCase();
+  const title = String(track.title || '');
+  let score = 0;
+  if (CHINESE_LANG.has(lang)) score += 100;
+  else if (/^zh/.test(lang)) score += 90;
+  if (CHINESE_TITLE.test(title)) score += 80;
+  if (track.default) score += 1;             // 只当很弱的参考，不能盖过"中文优先"
+  score += Math.max(0, 10 - position);       // 同分时靠前的优先（对应"第一条通常是中文"）
+  return score;
+}
+
+// 从 mpv 的 track-list 里挑一条字幕轨，返回它的 id（mpv 的 sid 用的那个）；没有字幕轨返回 null
+function pickSubtitleTrack(trackList) {
+  const subs = (Array.isArray(trackList) ? trackList : [])
+    .filter((t) => t && t.type === 'sub' && !t.dependent);
+  if (!subs.length) return null;
+  let best = null;
+  subs.forEach((t, i) => {
+    const score = subtitleTrackScore(t, i);
+    if (!best || score > best.score) best = { id: t.id, score };
+  });
+  return best ? best.id : null;
+}
+
 function humanSize(bytes) {
   const n = Number(bytes) || 0;
   if (n < 1024) return n + ' B';
@@ -170,4 +208,5 @@ module.exports = {
   DEFAULT_VIDEO_EXTS, DEFAULT_AUDIO_EXTS, DEFAULT_IMAGE_EXTS, DEFAULT_SUB_EXTS, DEFAULT_SUB_DIRS,
   extOf, stripExt, kindOf, isPlayable, subtitleScore, findSubtitlesIn, singleVideoFallback, humanSize, langHint,
   naturalCompare, buildSeries,
+  subtitleTrackScore, pickSubtitleTrack,
 };

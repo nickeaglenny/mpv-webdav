@@ -549,6 +549,14 @@ class Cdp {
     await cdp.waitFor('!document.querySelector("#dlg-settings").classList.contains("hidden")');
     const mpvPathShown = await cdp.eval('document.querySelector("#st-mpv-path").value');
     check('设置对话框回填 mpv 路径', /mpv\.exe$/i.test(mpvPathShown), mpvPathShown);
+    const dialogFields = await cdp.eval(`JSON.stringify({
+      subZh: !!document.querySelector('#st-sub-zh'),
+      subZhChecked: document.querySelector('#st-sub-zh') ? document.querySelector('#st-sub-zh').checked : null,
+      focusBox: !!document.querySelector('#st-mpv-focus'),
+      ontopGone: !document.querySelector('#st-mpv-ontop')
+    })`);
+    check('设置里有「字幕默认选中文」且默认勾选', /"subZh":true,"subZhChecked":true/.test(dialogFields), dialogFields);
+    check('「播放时置顶」已移除（窗口不再被锁在最前面）', /"ontopGone":true/.test(dialogFields), dialogFields);
     await cdp.realClick(12, 12);
     await sleep(300);
     check('点遮罩不会关闭设置对话框',

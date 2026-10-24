@@ -1383,7 +1383,7 @@ function openSettingsDialog() {
   $('#st-sub-dirs').value = listToText(st.subDirs);
   $('#st-sub-fallback').checked = st.subFallbackSingleVideo !== false;
   $('#st-sub-encoding').value = st.subEncoding || 'auto';
-  $('#st-mpv-ontop').checked = st.mpvOntop !== false;
+  $('#st-sub-zh').checked = st.subtitlesPreferChinese !== false;
   $('#st-mpv-focus').checked = st.mpvFocusOnPlay !== false;
   $('#st-mpv-fullscreen').checked = st.mpvAutoFullscreen === true;
   $('#st-wl-max').value = String(typeof st.watchLaterMaxEntries === 'number' ? st.watchLaterMaxEntries : 200);
@@ -1414,7 +1414,7 @@ function saveSettingsFromDialog() {
     subDirs: parseList($('#st-sub-dirs').value),
     subFallbackSingleVideo: !!$('#st-sub-fallback').checked,
     subEncoding: $('#st-sub-encoding').value,
-    mpvOntop: !!$('#st-mpv-ontop').checked,
+    subtitlesPreferChinese: !!$('#st-sub-zh').checked,
     mpvFocusOnPlay: !!$('#st-mpv-focus').checked,
     mpvAutoFullscreen: !!$('#st-mpv-fullscreen').checked,
     watchLaterMaxEntries: Math.max(0, parseInt($('#st-wl-max').value, 10) || 0),

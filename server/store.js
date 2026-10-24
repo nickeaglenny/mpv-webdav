@@ -26,8 +26,8 @@ const DEFAULT_SETTINGS = {
   watchLaterMaxEntries: 200,  // 最多保留多少条进度
   watchLaterMaxDays: 90,      // 超过多少天没动过的进度自动清掉（0 = 不按天数清）
   // 播放时的 mpv 窗口行为
-  mpvOntop: true,             // 播放中把 mpv 窗口置顶（空闲时自动取消，避免挡住桌面）
   mpvFocusOnPlay: true,       // 开始播放时把键盘焦点交给 mpv（否则按空格暂停前得先点一下窗口）
+  subtitlesPreferChinese: true,  // 字幕默认选中文轨（找不到中文就选第一条）
   mpvAutoFullscreen: false,   // 播放中自动全屏（默认关闭）
 };
 
@@ -105,6 +105,8 @@ class Store {
     }
     this.settings = Object.assign({}, DEFAULT_SETTINGS, settingsValue);
     if (!this.settings.mpvPath) this.settings.mpvPath = defaultMpvPath;
+    // 已移除的设置项：老 settings.json 里可能还留着，清掉免得一直传下去（窗口不再强制置顶）
+    if ('mpvOntop' in this.settings) delete this.settings.mpvOntop;
     if (settingsRead.recovered) this.saveSettings({ backup: false });
 
     // 每个专辑"上次浏览到哪"：体积有界（条数 = 专辑数）；坏了就当空的，不影响启动
@@ -336,8 +338,8 @@ class Store {
       const v = parseInt(src.watchLaterMaxDays, 10);
       next.watchLaterMaxDays = Number.isFinite(v) && v >= 0 ? Math.min(3650, v) : next.watchLaterMaxDays;
     }
-    if (src.mpvOntop !== undefined) next.mpvOntop = !!src.mpvOntop;
     if (src.mpvFocusOnPlay !== undefined) next.mpvFocusOnPlay = !!src.mpvFocusOnPlay;
+    if (src.subtitlesPreferChinese !== undefined) next.subtitlesPreferChinese = !!src.subtitlesPreferChinese;
     if (src.mpvAutoFullscreen !== undefined) next.mpvAutoFullscreen = !!src.mpvAutoFullscreen;
     for (const key of ['videoExts', 'audioExts', 'subExts', 'subDirs', 'extraMpvArgs']) {
       if (src[key] === undefined) continue;

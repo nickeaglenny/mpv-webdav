@@ -3,6 +3,7 @@
 // 用法：node tools/encoding-test.js
 
 const { detectAndDecode, toUtf8Buffer } = require('../server/text-encoding');
+const media = require('../server/media');
 
 const results = [];
 let failed = 0;
@@ -62,6 +63,26 @@ const assConv = toUtf8Buffer(assGbk);
 check('GBK 的 ASS 文件可整体转成 UTF-8',
   assConv.changed && assConv.buffer.toString('utf8').includes('测试') && assConv.buffer.toString('utf8').includes('这句字幕'),
   assConv.buffer.toString('utf8').split('\n')[1]);
+
+// ---------- 内嵌字幕轨的自动选择（无语言标记时也要能挑到中文） ----------
+const noLang = [
+  { id: 1, type: 'video' },
+  { id: 1, type: 'sub', title: '简体中文' },
+  { id: 2, type: 'sub', title: '繁體中文' },
+  { id: 3, type: 'sub', title: 'English', default: true },
+];
+check('无语言标记时按标题挑到简体中文', media.pickSubtitleTrack(noLang) === 1, String(media.pickSubtitleTrack(noLang)));
+check('有语言标记时按 chi 挑',
+  media.pickSubtitleTrack([{ id: 1, type: 'sub', lang: 'chi' }, { id: 2, type: 'sub', lang: 'eng', default: true }]) === 1);
+check('完全没元数据时选第一条',
+  media.pickSubtitleTrack([{ id: 7, type: 'sub' }, { id: 8, type: 'sub', default: true }]) === 7);
+check('没有字幕轨返回 null', media.pickSubtitleTrack([{ id: 1, type: 'video' }]) === null);
+check('外挂中文字幕优先于英文',
+  media.pickSubtitleTrack([{ id: 1, type: 'sub', title: 'movie.eng.srt' }, { id: 2, type: 'sub', title: 'movie.chs.srt' }]) === 2);
+check('忽略 dependent 轨（forced/封面等）',
+  media.pickSubtitleTrack([{ id: 1, type: 'sub', title: 'English', dependent: true }, { id: 2, type: 'sub', title: '中文' }]) === 2);
+check('default 标记不能盖过中文优先（正是要修的那个 bug）',
+  media.pickSubtitleTrack([{ id: 1, type: 'sub', title: '简体中文' }, { id: 3, type: 'sub', title: 'English', default: true }]) === 1);
 
 console.log('');
 console.log(`结果: ${results.filter((r) => r.ok).length}/${results.length} 通过`);
